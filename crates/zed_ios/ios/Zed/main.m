@@ -10,7 +10,6 @@
 extern void zed_ios_init(void);
 
 @interface ZedAppDelegate : UIResponder <UIApplicationDelegate>
-@property (strong, nonatomic) UIWindow *window;
 @end
 
 @implementation ZedAppDelegate

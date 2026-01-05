@@ -49,6 +49,10 @@ use super::IosDisplay;
 
 const WINDOW_STATE_IVAR: &str = "windowState";
 
+unsafe extern "C" {
+    static NSRunLoopCommonModes: *mut Object;
+}
+
 static VIEW_CLASS: OnceLock<&'static Class> = OnceLock::new();
 static VIEW_CONTROLLER_CLASS: OnceLock<&'static Class> = OnceLock::new();
 
@@ -356,7 +360,7 @@ extern "C" fn view_will_transition(
         if !state_ptr.is_null() {
             let state = &*(state_ptr as *const WindowState);
             if let Some(callback) = state.resize_callback.lock().as_mut() {
-                let scale = state.scale_factor.lock().clone();
+                let scale = *state.scale_factor.lock();
                 callback(
                     size(px(new_size.width as f32), px(new_size.height as f32)),
                     scale,
@@ -383,7 +387,7 @@ extern "C" fn safe_area_insets_did_change(this: &Object, _sel: Sel) {
             if !view.is_null() {
                 let bounds: CGRect = msg_send![view, bounds];
                 let size = bounds.size;
-                let scale = state.scale_factor.lock().clone();
+                let scale = *state.scale_factor.lock();
                 callback(crate::size(px(size.width as f32), px(size.height as f32)), scale);
             }
         }
@@ -586,30 +590,25 @@ impl IosWindow {
                 view_controller_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
             (*view_controller).set_ivar(WINDOW_STATE_IVAR, vc_weak_ptr);
             
-            // Create display link target object
+            // Create display link target object. The alloc+init gives us ownership with
+            // retain count 1. CADisplayLink doesn't retain its target, so we store the raw
+            // pointer in IosWindow to keep it alive. We release it in Drop to balance the
+            // alloc+init.
             let display_link_target_class = *DISPLAY_LINK_TARGET_CLASS.get().unwrap();
             let display_link_target: *mut Object = msg_send![display_link_target_class, alloc];
             let display_link_target: *mut Object = msg_send![display_link_target, init];
             let dl_weak_ptr = display_link_target_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
             (*display_link_target).set_ivar(WINDOW_STATE_IVAR, dl_weak_ptr);
             
-            // Create and start CADisplayLink
+            // Create CADisplayLink
             let display_link: *mut Object = msg_send![
                 class!(CADisplayLink),
                 displayLinkWithTarget: display_link_target
                 selector: sel!(step:)
             ];
             
-            // Retain the display link target since CADisplayLink doesn't retain its target
-            let _: *mut Object = msg_send![display_link_target, retain];
-            
             // Add display link to main run loop
-            // NSRunLoopCommonModes = "kCFRunLoopCommonModes"
             let run_loop: *mut Object = msg_send![class!(NSRunLoop), mainRunLoop];
-            // Use the extern symbol for NSRunLoopCommonModes
-            unsafe extern "C" {
-                static NSRunLoopCommonModes: *mut Object;
-            }
             let _: () = msg_send![display_link, addToRunLoop: run_loop forMode: NSRunLoopCommonModes];
             
             // Store display link in state so we can stop it later
