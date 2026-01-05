@@ -131,7 +131,8 @@ pub(crate) struct MetalRenderer {
     layer: metal::MetalLayer,
     presents_with_transaction: bool,
     command_queue: CommandQueue,
-    path_pipeline_state: metal::RenderPipelineState,
+    paths_rasterization_pipeline_state: metal::RenderPipelineState,
+    path_sprites_pipeline_state: metal::RenderPipelineState,
     shadows_pipeline_state: metal::RenderPipelineState,
     quads_pipeline_state: metal::RenderPipelineState,
     underlines_pipeline_state: metal::RenderPipelineState,
@@ -142,7 +143,9 @@ pub(crate) struct MetalRenderer {
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
-    sample_count: u64,
+    path_sample_count: u32,
+    path_intermediate_texture: Option<metal::Texture>,
+    path_intermediate_msaa_texture: Option<metal::Texture>,
     msaa_texture: Option<metal::Texture>,
 }
 
@@ -203,12 +206,20 @@ impl MetalRenderer {
             .find(|count| device.supports_texture_sample_count(*count))
             .unwrap_or(1);
 
-        let path_pipeline_state = build_pipeline_state(
+        let paths_rasterization_pipeline_state = build_path_rasterization_pipeline_state(
             &device,
             &library,
-            "paths",
-            "path_vertex",
-            "path_fragment",
+            "path_rasterization",
+            "path_rasterization_vertex",
+            "path_rasterization_fragment",
+            sample_count as u32,
+        );
+        let path_sprites_pipeline_state = build_pipeline_state(
+            &device,
+            &library,
+            "path_sprites",
+            "path_sprite_vertex",
+            "path_sprite_fragment",
             MTLPixelFormat::BGRA8Unorm,
             sample_count,
         );
@@ -269,6 +280,7 @@ impl MetalRenderer {
 
         let command_queue = device.new_command_queue();
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone()));
+        let path_sample_count = sample_count as u32;
         let msaa_texture = create_msaa_texture(&device, &layer, sample_count);
 
         Self {
@@ -276,7 +288,8 @@ impl MetalRenderer {
             layer,
             presents_with_transaction: false,
             command_queue,
-            path_pipeline_state,
+            paths_rasterization_pipeline_state,
+            path_sprites_pipeline_state,
             shadows_pipeline_state,
             quads_pipeline_state,
             underlines_pipeline_state,
@@ -286,7 +299,9 @@ impl MetalRenderer {
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
-            sample_count,
+            path_sample_count,
+            path_intermediate_texture: None,
+            path_intermediate_msaa_texture: None,
             msaa_texture,
         }
     }
@@ -321,7 +336,7 @@ impl MetalRenderer {
             ];
         }
 
-        self.msaa_texture = create_msaa_texture(&self.device, &self.layer, self.sample_count);
+        self.msaa_texture = create_msaa_texture(&self.device, &self.layer, self.path_sample_count as u64);
     }
 
     pub fn update_transparency(&self, _transparent: bool) {
@@ -657,7 +672,7 @@ impl MetalRenderer {
             return true;
         }
 
-        command_encoder.set_render_pipeline_state(&self.path_pipeline_state);
+        command_encoder.set_render_pipeline_state(&self.paths_rasterization_pipeline_state);
 
         unsafe {
             let base_addr = instance_buffer.metal_buffer.contents();
@@ -1022,6 +1037,44 @@ fn build_pipeline_state(
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
     color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+
+    device
+        .new_render_pipeline_state(&descriptor)
+        .expect("could not create render pipeline state")
+}
+
+fn build_path_rasterization_pipeline_state(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    path_sample_count: u32,
+) -> metal::RenderPipelineState {
+    let vertex_fn = library
+        .get_function(vertex_fn_name, None)
+        .expect("error locating vertex function");
+    let fragment_fn = library
+        .get_function(fragment_fn_name, None)
+        .expect("error locating fragment function");
+
+    let descriptor = metal::RenderPipelineDescriptor::new();
+    descriptor.set_label(label);
+    descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
+    descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    if path_sample_count > 1 {
+        descriptor.set_raster_sample_count(path_sample_count as _);
+        descriptor.set_alpha_to_coverage_enabled(false);
+    }
+    let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+    color_attachment.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+    color_attachment.set_blending_enabled(true);
+    color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
+    color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
+    color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
+    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
 
     device
         .new_render_pipeline_state(&descriptor)

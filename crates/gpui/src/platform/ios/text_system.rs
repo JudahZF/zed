@@ -1,8 +1,9 @@
 //! iOS-specific text system.
 //!
-//! This is a copy of the macOS text system with iOS-specific adaptations:
+//! This is adapted from the macOS text system with iOS-specific modifications:
 //! - CGFloat is defined locally instead of imported from cocoa
 //! - CGPoint is imported from core_graphics::geometry (iOS-compatible path)
+//! - Font name mapping handles iOS system font names
 
 use crate::{
     Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun,
@@ -221,10 +222,13 @@ impl MacTextSystemState {
         features: &FontFeatures,
         fallbacks: Option<&FontFallbacks>,
     ) -> Result<SmallVec<[FontId; 4]>> {
-        let name = if name == ".SystemUIFont" {
-            ".AppleSystemUIFont"
-        } else {
-            name
+        // On iOS, map system font names to our embedded fonts since iOS doesn't
+        // have the same system fonts as macOS
+        let name = match name {
+            ".SystemUIFont" | ".AppleSystemUIFont" => "IBM Plex Sans",
+            ".ZedSans" | "Zed Plex Sans" => "IBM Plex Sans",
+            ".ZedMono" | "Zed Plex Mono" => "Lilex",
+            _ => name,
         };
 
         let mut font_ids = SmallVec::new();
