@@ -181,13 +181,18 @@ pub fn translate_key_press(
             None
         };
 
+        // Derive the character (if any) from the UIKey's characters string
+        let key_char = key_str
+            .as_ref()
+            .and_then(|s| s.chars().next());
+
         // Map UIKeyboardHIDUsage to key string
-        let key = key_str.unwrap_or_else(|| key_code_to_string(key_code));
+        let key = key_str.clone().unwrap_or_else(|| key_code_to_string(key_code));
 
         let keystroke = Keystroke {
             key: key.into(),
             modifiers,
-            key_char: None,
+            key_char,
         };
 
         if is_key_down {

@@ -473,9 +473,9 @@ impl IosWindow {
             (*view).set_ivar(WINDOW_STATE_IVAR, state_ptr);
             (*view_controller).set_ivar(WINDOW_STATE_IVAR, state_ptr);
             
-            // Keep the Arc alive
+            // Keep the Arc alive - increment for each ivar that holds the pointer
             Arc::increment_strong_count(Arc::as_ptr(&state));
-            
+            Arc::increment_strong_count(Arc::as_ptr(&state));
             // Set up the view hierarchy
             let _: () = msg_send![view_controller, setView: view];
             let _: () = msg_send![ui_window, setRootViewController: view_controller];
