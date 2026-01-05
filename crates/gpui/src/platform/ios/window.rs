@@ -477,14 +477,10 @@ impl IosWindow {
             let view: *mut Object = msg_send![view_class, alloc];
             let view: *mut Object = msg_send![view, initWithFrame: screen_bounds];
 
-            // Create the renderer - this creates its own CAMetalLayer
+            // Create the renderer - this will render into the view's CAMetalLayer
             let renderer = MetalRenderer::new(renderer_context);
 
-            // Get the Metal layer from the renderer and set it as the view's layer
-            let metal_layer = renderer.layer_ptr();
-            let _: () = msg_send![view, setLayer: metal_layer];
-
-            // Configure the layer scale
+            // Configure the view's existing Metal layer
             let layer: *mut Object = msg_send![view, layer];
             let _: () = msg_send![layer, setContentsScale: scale];
             let drawable_size = CGSize {
