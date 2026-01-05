@@ -1,7 +1,13 @@
 #![allow(unused, non_upper_case_globals)]
 
 use crate::{FontFallbacks, FontFeatures};
+
+// CGFloat type - use cocoa on macOS, define locally on iOS
+#[cfg(target_os = "macos")]
 use cocoa::appkit::CGFloat;
+#[cfg(target_os = "ios")]
+#[allow(non_camel_case_types)]
+type CGFloat = f64;
 use core_foundation::{
     array::{
         CFArray, CFArrayAppendArray, CFArrayAppendValue, CFArrayCreateMutable, CFArrayGetCount,
@@ -15,7 +21,7 @@ use core_foundation::{
     string::{CFString, CFStringRef},
 };
 use core_foundation_sys::locale::CFLocaleCopyPreferredLanguages;
-use core_graphics::{display::CFDictionary, geometry::CGAffineTransform};
+use core_graphics::geometry::CGAffineTransform;
 use core_text::{
     font::{CTFont, CTFontRef, cascade_list_for_languages},
     font_descriptor::{
