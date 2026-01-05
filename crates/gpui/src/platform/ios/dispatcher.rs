@@ -12,12 +12,9 @@ use objc::{
     runtime::{BOOL, YES},
     sel, sel_impl,
 };
-use parking::{Parker, Unparker};
-use parking_lot::Mutex;
 use std::{
     ffi::c_void,
     ptr::NonNull,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -45,9 +42,7 @@ unsafe extern "C" {
     fn dispatch_time(when: dispatch_time_t, delta: i64) -> dispatch_time_t;
 }
 
-pub(crate) struct IosDispatcher {
-    parker: Arc<Mutex<Parker>>,
-}
+pub(crate) struct IosDispatcher;
 
 impl Default for IosDispatcher {
     fn default() -> Self {
@@ -57,9 +52,7 @@ impl Default for IosDispatcher {
 
 impl IosDispatcher {
     pub fn new() -> Self {
-        IosDispatcher {
-            parker: Arc::new(Mutex::new(Parker::new())),
-        }
+        IosDispatcher
     }
 }
 
@@ -153,19 +146,6 @@ impl PlatformDispatcher for IosDispatcher {
         std::thread::spawn(move || {
             f();
         });
-    }
-
-    fn park(&self, timeout: Option<Duration>) -> bool {
-        if let Some(timeout) = timeout {
-            self.parker.lock().park_timeout(timeout)
-        } else {
-            self.parker.lock().park();
-            true
-        }
-    }
-
-    fn unparker(&self) -> Unparker {
-        self.parker.lock().unparker()
     }
 }
 

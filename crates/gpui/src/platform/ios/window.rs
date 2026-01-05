@@ -32,6 +32,7 @@ use raw_window_handle::{
 use std::{
     cell::RefCell,
     ffi::c_void,
+    ptr,
     ptr::NonNull,
     rc::Rc,
     sync::{Arc, OnceLock},
@@ -294,6 +295,7 @@ extern "C" fn display_layer(this: &Object, _sel: Sel, _layer: *mut Object) {
         if let Some(callback) = state.request_frame_callback.lock().as_mut() {
             callback(RequestFrameOptions {
                 require_presentation: true,
+                force_render: false,
             });
         }
     }
@@ -698,7 +700,7 @@ impl PlatformWindow for IosWindow {
         // iOS windows can't be arbitrarily resized
     }
 
-    fn update_ime_position(&self, _bounds: Bounds<ScaledPixels>) {
+    fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
         // Could position the software keyboard cursor indicator
     }
 }

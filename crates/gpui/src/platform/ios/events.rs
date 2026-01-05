@@ -182,9 +182,7 @@ pub fn translate_key_press(
         };
 
         // Derive the character (if any) from the UIKey's characters string
-        let key_char = key_str
-            .as_ref()
-            .and_then(|s| s.chars().next());
+        let key_char = key_str.clone();
 
         // Map UIKeyboardHIDUsage to key string
         let key = key_str.clone().unwrap_or_else(|| key_code_to_string(key_code));
@@ -199,6 +197,7 @@ pub fn translate_key_press(
             Some(PlatformInput::KeyDown(KeyDownEvent {
                 keystroke,
                 is_held: is_repeat,
+                prefer_character_input: false,
             }))
         } else {
             Some(PlatformInput::KeyUp(KeyUpEvent { keystroke }))

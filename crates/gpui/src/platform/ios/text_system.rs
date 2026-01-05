@@ -1,3 +1,9 @@
+//! iOS-specific text system.
+//!
+//! This is a copy of the macOS text system with iOS-specific adaptations:
+//! - CGFloat is defined locally instead of imported from cocoa
+//! - CGPoint is imported from core_graphics::geometry (iOS-compatible path)
+
 use crate::{
     Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun,
     FontStyle, FontWeight, GlyphId, LineLayout, Pixels, PlatformTextSystem, Point,
@@ -5,7 +11,11 @@ use crate::{
     SharedString, Size, point, px, size, swap_rgba_pa_to_bgra,
 };
 use anyhow::anyhow;
-use cocoa::appkit::CGFloat;
+
+// CGFloat type - defined locally for iOS (always f64 on 64-bit)
+#[allow(non_camel_case_types)]
+type CGFloat = f64;
+
 use collections::HashMap;
 use core_foundation::{
     attributed_string::CFMutableAttributedString,
@@ -17,7 +27,7 @@ use core_graphics::{
     base::{CGGlyph, kCGImageAlphaPremultipliedLast},
     color_space::CGColorSpace,
     context::CGContext,
-    display::CGPoint,
+    geometry::CGPoint,
 };
 use core_text::{
     font::CTFont,

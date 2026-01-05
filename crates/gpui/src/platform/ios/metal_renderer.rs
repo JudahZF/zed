@@ -1,3 +1,10 @@
+//! iOS-specific Metal renderer.
+//!
+//! This is a copy of the macOS Metal renderer with iOS-specific adaptations:
+//! - Cocoa types (NSSize, NSUInteger, etc.) are defined locally instead of imported
+//! - core_video is disabled (no video texture rendering on iOS for Phase 1)
+//! - draw_surfaces is stubbed as a no-op
+
 use super::metal_atlas::MetalAtlas;
 use crate::{
     AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite, PaintSurface,
@@ -6,16 +13,44 @@ use crate::{
 };
 use anyhow::Result;
 use block::ConcreteBlock;
-use cocoa::{
-    base::{NO, YES},
-    foundation::{NSSize, NSUInteger},
-    quartzcore::AutoresizingMask,
-};
+
+// iOS compatibility - provide Cocoa-equivalent types without cocoa crate
+#[allow(non_camel_case_types, dead_code)]
+mod cocoa_compat {
+    pub use objc::runtime::{NO, YES};
+    pub type NSUInteger = usize;
+
+    #[repr(C)]
+    #[derive(Copy, Clone, Debug, Default)]
+    pub struct NSSize {
+        pub width: f64,
+        pub height: f64,
+    }
+
+    impl NSSize {
+        pub fn new(width: f64, height: f64) -> Self {
+            NSSize { width, height }
+        }
+    }
+
+    bitflags::bitflags! {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub struct AutoresizingMask: NSUInteger {
+            const NOT_SIZABLE = 0;
+            const MIN_X_MARGIN = 1 << 0;
+            const WIDTH_SIZABLE = 1 << 1;
+            const MAX_X_MARGIN = 1 << 2;
+            const MIN_Y_MARGIN = 1 << 3;
+            const HEIGHT_SIZABLE = 1 << 4;
+            const MAX_Y_MARGIN = 1 << 5;
+        }
+    }
+}
+
+use cocoa_compat::{AutoresizingMask, NSSize, NSUInteger, NO, YES};
+
 use core_foundation::base::TCFType;
-use core_video::{
-    metal_texture::CVMetalTextureGetTexture, metal_texture_cache::CVMetalTextureCache,
-    pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-};
+
 use foreign_types::{ForeignType, ForeignTypeRef};
 use metal::{
     CAMetalLayer, CommandQueue, MTLDrawPrimitivesIndirectArguments, MTLPixelFormat,
@@ -107,19 +142,14 @@ pub(crate) struct MetalRenderer {
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
-    core_video_texture_cache: core_video::metal_texture_cache::CVMetalTextureCache,
     sample_count: u64,
     msaa_texture: Option<metal::Texture>,
 }
 
 impl MetalRenderer {
     pub fn new(instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>) -> Self {
-        // Prefer low‐power integrated GPUs on Intel Mac. On Apple
-        // Silicon, there is only ever one GPU, so this is equivalent to
-        // `metal::Device::system_default()`.
-        let mut devices = metal::Device::all();
-        devices.sort_by_key(|device| (device.is_removable(), device.is_low_power()));
-        let Some(device) = devices.pop() else {
+        // On iOS, there is only one GPU
+        let Some(device) = metal::Device::system_default() else {
             log::error!("unable to access a compatible graphics device");
             std::process::exit(1);
         };
@@ -239,8 +269,6 @@ impl MetalRenderer {
 
         let command_queue = device.new_command_queue();
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone()));
-        let core_video_texture_cache =
-            CVMetalTextureCache::new(None, device.clone(), None).unwrap();
         let msaa_texture = create_msaa_texture(&device, &layer, sample_count);
 
         Self {
@@ -258,7 +286,6 @@ impl MetalRenderer {
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
-            core_video_texture_cache,
             sample_count,
             msaa_texture,
         }
@@ -298,7 +325,7 @@ impl MetalRenderer {
     }
 
     pub fn update_transparency(&self, _transparent: bool) {
-        // todo(mac)?
+        // todo(ios)?
     }
 
     pub fn destroy(&self) {
@@ -491,7 +518,7 @@ impl MetalRenderer {
 
         instance_buffer.metal_buffer.did_modify_range(NSRange {
             location: 0,
-            length: instance_offset as NSUInteger,
+            length: instance_offset as u64,
         });
         Ok(command_buffer.to_owned())
     }
@@ -651,6 +678,7 @@ impl MetalRenderer {
                 for v in &path.vertices {
                     *(p as *mut PathVertex<ScaledPixels>) = PathVertex {
                         xy_position: v.xy_position,
+                        st_position: v.st_position,
                         content_mask: ContentMask {
                             bounds: path.content_mask.bounds,
                         },
@@ -946,102 +974,20 @@ impl MetalRenderer {
         true
     }
 
+    /// Draw video surfaces.
+    ///
+    /// On iOS Phase 1, video texture rendering via core_video is not supported.
+    /// This is a no-op that always succeeds.
     fn draw_surfaces(
         &mut self,
-        surfaces: &[PaintSurface],
-        instance_buffer: &mut InstanceBuffer,
-        instance_offset: &mut usize,
-        viewport_size: Size<DevicePixels>,
-        command_encoder: &metal::RenderCommandEncoderRef,
+        _surfaces: &[PaintSurface],
+        _instance_buffer: &mut InstanceBuffer,
+        _instance_offset: &mut usize,
+        _viewport_size: Size<DevicePixels>,
+        _command_encoder: &metal::RenderCommandEncoderRef,
     ) -> bool {
-        command_encoder.set_render_pipeline_state(&self.surfaces_pipeline_state);
-        command_encoder.set_vertex_buffer(
-            SurfaceInputIndex::Vertices as u64,
-            Some(&self.unit_vertices),
-            0,
-        );
-        command_encoder.set_vertex_bytes(
-            SurfaceInputIndex::ViewportSize as u64,
-            mem::size_of_val(&viewport_size) as u64,
-            &viewport_size as *const Size<DevicePixels> as *const _,
-        );
-
-        for surface in surfaces {
-            let texture_size = size(
-                DevicePixels::from(surface.image_buffer.get_width() as i32),
-                DevicePixels::from(surface.image_buffer.get_height() as i32),
-            );
-
-            assert_eq!(
-                surface.image_buffer.get_pixel_format(),
-                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-            );
-
-            let y_texture = self
-                .core_video_texture_cache
-                .create_texture_from_image(
-                    surface.image_buffer.as_concrete_TypeRef(),
-                    None,
-                    MTLPixelFormat::R8Unorm,
-                    surface.image_buffer.get_width_of_plane(0),
-                    surface.image_buffer.get_height_of_plane(0),
-                    0,
-                )
-                .unwrap();
-            let cb_cr_texture = self
-                .core_video_texture_cache
-                .create_texture_from_image(
-                    surface.image_buffer.as_concrete_TypeRef(),
-                    None,
-                    MTLPixelFormat::RG8Unorm,
-                    surface.image_buffer.get_width_of_plane(1),
-                    surface.image_buffer.get_height_of_plane(1),
-                    1,
-                )
-                .unwrap();
-
-            align_offset(instance_offset);
-            let next_offset = *instance_offset + mem::size_of::<Surface>();
-            if next_offset > instance_buffer.size {
-                return false;
-            }
-
-            command_encoder.set_vertex_buffer(
-                SurfaceInputIndex::Surfaces as u64,
-                Some(&instance_buffer.metal_buffer),
-                *instance_offset as u64,
-            );
-            command_encoder.set_vertex_bytes(
-                SurfaceInputIndex::TextureSize as u64,
-                mem::size_of_val(&texture_size) as u64,
-                &texture_size as *const Size<DevicePixels> as *const _,
-            );
-            // let y_texture = y_texture.get_texture().unwrap().
-            command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
-                let texture = CVMetalTextureGetTexture(y_texture.as_concrete_TypeRef());
-                Some(metal::TextureRef::from_ptr(texture as *mut _))
-            });
-            command_encoder.set_fragment_texture(SurfaceInputIndex::CbCrTexture as u64, unsafe {
-                let texture = CVMetalTextureGetTexture(cb_cr_texture.as_concrete_TypeRef());
-                Some(metal::TextureRef::from_ptr(texture as *mut _))
-            });
-
-            unsafe {
-                let buffer_contents = (instance_buffer.metal_buffer.contents() as *mut u8)
-                    .add(*instance_offset)
-                    as *mut SurfaceBounds;
-                ptr::write(
-                    buffer_contents,
-                    SurfaceBounds {
-                        bounds: surface.bounds,
-                        content_mask: surface.content_mask.clone(),
-                    },
-                );
-            }
-
-            command_encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 6);
-            *instance_offset = next_offset;
-        }
+        // Video texture rendering requires core_video which we're not using on iOS Phase 1.
+        // Return true to indicate success (surfaces are simply not rendered).
         true
     }
 }
@@ -1152,6 +1098,7 @@ enum SpriteInputIndex {
 }
 
 #[repr(C)]
+#[allow(dead_code)]
 enum SurfaceInputIndex {
     Vertices = 0,
     Surfaces = 1,

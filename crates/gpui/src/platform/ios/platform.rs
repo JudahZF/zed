@@ -6,11 +6,11 @@
 use super::{IosDispatcher, IosDisplay, IosWindow, ns_string, renderer};
 use crate::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardEntry, ClipboardItem, ForegroundExecutor,
-    Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay,
-    PlatformKeyboardLayout, PlatformTextSystem, PlatformWindow, Result, SemanticVersion, Task,
-    WindowAppearance, WindowParams,
+    Keymap, Menu, MenuItem, PathPromptOptions, Platform, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result, Task,
+    WindowAppearance, WindowParams, DummyKeyboardMapper,
 };
-use anyhow::{anyhow, Context as _};
+use anyhow::anyhow;
 use futures::channel::oneshot;
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use parking_lot::Mutex;
@@ -208,7 +208,7 @@ impl Platform for IosPlatform {
         rx
     }
 
-    fn prompt_for_new_path(&self, _directory: &Path) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+    fn prompt_for_new_path(&self, _directory: &Path, _suggested_name: Option<&str>) -> oneshot::Receiver<Result<Option<PathBuf>>> {
         let (tx, rx) = oneshot::channel();
         tx.send(Err(anyhow!("Local file access not supported on iOS. Use remote connection."))).ok();
         rx
@@ -264,6 +264,10 @@ impl Platform for IosPlatform {
         Box::new(IosKeyboardLayout::new())
     }
 
+    fn keyboard_mapper(&self) -> Rc<dyn PlatformKeyboardMapper> {
+        Rc::new(DummyKeyboardMapper)
+    }
+
     fn app_path(&self) -> Result<PathBuf> {
         unsafe {
             let bundle: *mut Object = msg_send![class!(NSBundle), mainBundle];
@@ -303,9 +307,12 @@ impl Platform for IosPlatform {
                         let ns_string = ns_string(s.text());
                         let _: () = msg_send![pasteboard, setString: ns_string];
                     }
-                    ClipboardEntry::Image(img) => {
+                    ClipboardEntry::Image(_img) => {
                         // Could implement image clipboard support
                         // using setImage: or setData:forPasteboardType:
+                    }
+                    ClipboardEntry::ExternalPaths(_paths) => {
+                        // External file paths are not typically supported on iOS clipboard
                     }
                 }
             }
