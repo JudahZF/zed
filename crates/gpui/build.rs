@@ -541,7 +541,7 @@ mod ios {
             "ContentMask".into(),
             "Uniforms".into(),
             "AtlasTile".into(),
-            "PathRasterizationInputIndex".into(),
+            "PathInputIndex".into(),
             "PathVertex_ScaledPixels".into(),
             "PathRasterizationVertex".into(),
             "ShadowInputIndex".into(),

@@ -488,7 +488,7 @@ impl IosWindow {
             let state_ptr = Arc::as_ptr(&state) as *mut c_void;
             (*view).set_ivar(WINDOW_STATE_IVAR, state_ptr);
             (*view_controller).set_ivar(WINDOW_STATE_IVAR, state_ptr);
-            
+
             // Keep the Arc alive - increment for each ivar that holds the pointer
             Arc::increment_strong_count(Arc::as_ptr(&state));
             Arc::increment_strong_count(Arc::as_ptr(&state));
@@ -536,9 +536,16 @@ impl PlatformWindow for IosWindow {
     fn bounds(&self) -> Bounds<Pixels> {
         unsafe {
             let frame: CGRect = msg_send![self.view, frame];
+            let scale = self.scale_factor();
             Bounds {
-                origin: point(px(frame.origin.x as f32), px(frame.origin.y as f32)),
-                size: size(px(frame.size.width as f32), px(frame.size.height as f32)),
+                origin: point(
+                    px(frame.origin.x as f32 * scale),
+                    px(frame.origin.y as f32 * scale),
+                ),
+                size: size(
+                    px(frame.size.width as f32 * scale),
+                    px(frame.size.height as f32 * scale),
+                ),
             }
         }
     }
@@ -735,7 +742,9 @@ impl Drop for IosWindow {
                 callback();
             }
 
-            // Decrement the Arc strong count that we incremented in new()
+            // Decrement the Arc strong count for each ivar that held the pointer
+            // (we incremented twice in new() - once for view, once for view_controller)
+            Arc::decrement_strong_count(Arc::as_ptr(&self.state));
             Arc::decrement_strong_count(Arc::as_ptr(&self.state));
 
             // Hide the window

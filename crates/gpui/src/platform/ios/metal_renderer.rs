@@ -110,7 +110,7 @@ impl InstanceBufferPool {
         let buffer = self.buffers.pop().unwrap_or_else(|| {
             device.new_buffer(
                 self.buffer_size as u64,
-                MTLResourceOptions::StorageModeManaged,
+                MTLResourceOptions::StorageModeShared,
             )
         });
         InstanceBuffer {
