@@ -13,7 +13,6 @@ use super::{
     metal_renderer::MetalRenderer,
     BoolExt, CGPoint, CGRect, CGSize, UIEdgeInsets,
 };
-use std::mem::ManuallyDrop;
 
 use crate::{
     platform::PlatformInputHandler, point, px, size, AnyWindowHandle, Bounds, Capslock,
@@ -42,7 +41,7 @@ use std::{
     ptr,
     ptr::NonNull,
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, Weak},
 };
 
 use super::metal_renderer::InstanceBufferPool;
@@ -193,11 +192,9 @@ extern "C" fn touches_cancelled(
 
 fn handle_touches(view: &Object, touches: *mut Object, _phase: &str) {
     unsafe {
-        let state = get_window_state(view);
-        if state.is_null() {
+        let Some(state) = get_window_state(view) else {
             return;
-        }
-        let state = &*state;
+        };
 
         let count: usize = msg_send![touches, count];
         let all_objects: *mut Object = msg_send![touches, allObjects];
@@ -210,7 +207,7 @@ fn handle_touches(view: &Object, touches: *mut Object, _phase: &str) {
                 view as *const Object as *mut Object,
                 Modifiers::default(),
             ) {
-                dispatch_event(&state, event);
+                dispatch_event(&*state, event);
             }
         }
     }
@@ -240,11 +237,9 @@ extern "C" fn presses_cancelled(
 
 fn handle_presses(view: &Object, presses: *mut Object, is_key_down: bool) {
     unsafe {
-        let state = get_window_state(view);
-        if state.is_null() {
+        let Some(state) = get_window_state(view) else {
             return;
-        }
-        let state = &*state;
+        };
 
         let count: usize = msg_send![presses, count];
         let all_objects: *mut Object = msg_send![presses, allObjects];
@@ -285,11 +280,9 @@ extern "C" fn layout_subviews(this: &Object, _sel: Sel) {
         let superclass = class!(UIView);
         let _: () = msg_send![super(this, superclass), layoutSubviews];
 
-        let state = get_window_state(this);
-        if state.is_null() {
+        let Some(state) = get_window_state(this) else {
             return;
-        }
-        let state = &*state;
+        };
 
         // Update Metal layer size
         let bounds: CGRect = msg_send![this, bounds];
@@ -315,11 +308,9 @@ extern "C" fn layout_subviews(this: &Object, _sel: Sel) {
 
 extern "C" fn display_layer(this: &Object, _sel: Sel, _layer: *mut Object) {
     unsafe {
-        let state = get_window_state(this);
-        if state.is_null() {
+        let Some(state) = get_window_state(this) else {
             return;
-        }
-        let state = &*state;
+        };
 
         if let Some(callback) = state.request_frame_callback.lock().as_mut() {
             callback(RequestFrameOptions {
@@ -371,19 +362,18 @@ extern "C" fn safe_area_insets_did_change(this: &Object, _sel: Sel) {
         let _: () = msg_send![super(this, superclass), viewSafeAreaInsetsDidChange];
 
         // Notify about safe area changes by treating them as a layout/resize event.
-        let state_ptr: *mut c_void = *this.get_ivar(WINDOW_STATE_IVAR);
-        if !state_ptr.is_null() {
-            let state = &*(state_ptr as *const WindowState);
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
 
-            if let Some(callback) = state.resize_callback.lock().as_mut() {
-                // Obtain the current view size in points and convert to pixels.
-                let view: *mut Object = msg_send![this, view];
-                if !view.is_null() {
-                    let bounds: CGRect = msg_send![view, bounds];
-                    let size = bounds.size;
-                    let scale = state.scale_factor.lock().clone();
-                    callback(size(px(size.width as f32), px(size.height as f32)), scale);
-                }
+        if let Some(callback) = state.resize_callback.lock().as_mut() {
+            // Obtain the current view size in points and convert to pixels.
+            let view: *mut Object = msg_send![this, view];
+            if !view.is_null() {
+                let bounds: CGRect = msg_send![view, bounds];
+                let size = bounds.size;
+                let scale = state.scale_factor.lock().clone();
+                callback(size(px(size.width as f32), px(size.height as f32)), scale);
             }
         }
     }
@@ -395,20 +385,26 @@ extern "C" fn trait_collection_did_change(this: &Object, _sel: Sel, previous: *m
         let superclass = class!(UIViewController);
         let _: () = msg_send![super(this, superclass), traitCollectionDidChange: previous];
 
-        let state_ptr: *mut c_void = *this.get_ivar(WINDOW_STATE_IVAR);
-        if !state_ptr.is_null() {
-            let state = &*(state_ptr as *const WindowState);
-            if let Some(callback) = state.appearance_changed_callback.lock().as_mut() {
-                callback();
-            }
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        if let Some(callback) = state.appearance_changed_callback.lock().as_mut() {
+            callback();
         }
     }
 }
 
-unsafe fn get_window_state(view: &Object) -> *const WindowState {
-    // May be null; callers must check the returned pointer before dereferencing.
-    let state_ptr: *mut c_void = *view.get_ivar(WINDOW_STATE_IVAR);
-    state_ptr as *const WindowState
+/// Retrieves the WindowState from an Objective-C object's ivar.
+/// Returns None if the weak reference has been dropped or was never set.
+/// This is safe to call even after the IosWindow has been dropped.
+unsafe fn get_window_state(obj: &Object) -> Option<Arc<WindowState>> {
+    let weak_ptr: *mut c_void = *obj.get_ivar(WINDOW_STATE_IVAR);
+    if weak_ptr.is_null() {
+        return None;
+    }
+    let weak = &*(weak_ptr as *const Weak<WindowState>);
+    weak.upgrade()
 }
 fn dispatch_event(state: &WindowState, event: PlatformInput) {
     if let Some(callback) = state.input_callback.lock().as_mut() {
@@ -441,11 +437,12 @@ pub struct IosWindow {
     view: *mut Object,
     view_controller: *mut Object,
     state: Arc<WindowState>,
-    /// Arc clones stored in the Objective-C ivars. We use ManuallyDrop so we can
-    /// explicitly drop them when the IosWindow is dropped, ensuring proper
-    /// reference counting regardless of UIKit's object lifecycle.
-    view_state_arc: ManuallyDrop<Arc<WindowState>>,
-    view_controller_state_arc: ManuallyDrop<Arc<WindowState>>,
+    /// Weak references stored in the Objective-C ivars. These are boxed so we can
+    /// store stable pointers in the ivars. When the IosWindow is dropped, these
+    /// boxes are dropped, and subsequent attempts to upgrade the weak references
+    /// in callbacks will safely return None.
+    view_weak: Box<Weak<WindowState>>,
+    view_controller_weak: Box<Weak<WindowState>>,
 }
 
 
@@ -508,17 +505,18 @@ impl IosWindow {
                 scale_factor: Mutex::new(scale as f32),
             });
 
-            // Create separate Arc clones for each Objective-C object that will hold the state pointer.
-            // These are wrapped in ManuallyDrop so we control exactly when they're dropped,
-            // ensuring correct reference counting regardless of UIKit's object lifecycle.
-            let view_state_arc = ManuallyDrop::new(Arc::clone(&state));
-            let view_controller_state_arc = ManuallyDrop::new(Arc::clone(&state));
+            // Create weak references for each Objective-C object. By storing Weak<WindowState>
+            // instead of raw pointers, callbacks can safely attempt to upgrade and will get
+            // None if the IosWindow has been dropped, preventing use-after-free.
+            let view_weak = Box::new(Arc::downgrade(&state));
+            let view_controller_weak = Box::new(Arc::downgrade(&state));
 
-            // Store state pointer in Objective-C objects
-            let state_ptr = Arc::as_ptr(&view_state_arc) as *mut c_void;
-            (*view).set_ivar(WINDOW_STATE_IVAR, state_ptr);
-            let vc_state_ptr = Arc::as_ptr(&view_controller_state_arc) as *mut c_void;
-            (*view_controller).set_ivar(WINDOW_STATE_IVAR, vc_state_ptr);
+            // Store weak reference pointers in Objective-C objects
+            let view_weak_ptr = view_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
+            (*view).set_ivar(WINDOW_STATE_IVAR, view_weak_ptr);
+            let vc_weak_ptr =
+                view_controller_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
+            (*view_controller).set_ivar(WINDOW_STATE_IVAR, vc_weak_ptr);
             // Set up the view hierarchy
             let _: () = msg_send![view_controller, setView: view];
             let _: () = msg_send![ui_window, setRootViewController: view_controller];
@@ -534,8 +532,8 @@ impl IosWindow {
                 view,
                 view_controller,
                 state,
-                view_state_arc,
-                view_controller_state_arc,
+                view_weak,
+                view_controller_weak,
             })
         }
     }
@@ -841,7 +839,12 @@ impl PlatformWindow for IosWindow {
 impl Drop for IosWindow {
     fn drop(&mut self) {
         unsafe {
-            // Clear the state pointers in Objective-C objects
+            // Clear the weak reference pointers in Objective-C objects.
+            // This prevents any further attempts to access the state from callbacks.
+            // Note: The weak references themselves (view_weak, view_controller_weak)
+            // will be dropped when self is dropped, which is safe because:
+            // 1. We've cleared the ivar pointers, so callbacks won't try to use them
+            // 2. Any callback that already upgraded the weak ref has a valid Arc
             (*self.view).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
             (*self.view_controller).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
 
@@ -849,12 +852,6 @@ impl Drop for IosWindow {
             if let Some(callback) = self.state.close_callback.lock().take() {
                 callback();
             }
-
-            // Drop the Arc clones that were stored for the Objective-C ivars.
-            // This correctly decrements the reference count regardless of whether
-            // UIKit has already released the view or view_controller objects.
-            ManuallyDrop::drop(&mut self.view_state_arc);
-            ManuallyDrop::drop(&mut self.view_controller_state_arc);
 
             // Hide the window
             let _: () = msg_send![self.ui_window, setHidden: YES];
