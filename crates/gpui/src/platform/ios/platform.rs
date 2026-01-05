@@ -322,19 +322,15 @@ impl Platform for IosPlatform {
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         unsafe {
             let pasteboard: *mut Object = msg_send![class!(UIPasteboard), generalPasteboard];
-            let has_strings: bool = msg_send![pasteboard, hasStrings];
-
-            if has_strings {
-                let string: *mut Object = msg_send![pasteboard, string];
-                if !string.is_null() {
-                    let utf8: *const i8 = msg_send![string, UTF8String];
-                    if !utf8.is_null() {
-                        let s = std::ffi::CStr::from_ptr(utf8)
-                            .to_str()
-                            .ok()?
-                            .to_string();
-                        return Some(ClipboardItem::new_string(s));
-                    }
+            let string: *mut Object = msg_send![pasteboard, string];
+            if !string.is_null() {
+                let utf8: *const i8 = msg_send![string, UTF8String];
+                if !utf8.is_null() {
+                    let s = std::ffi::CStr::from_ptr(utf8)
+                        .to_str()
+                        .ok()?
+                        .to_string();
+                    return Some(ClipboardItem::new_string(s));
                 }
             }
             None

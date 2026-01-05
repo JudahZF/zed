@@ -4,18 +4,23 @@
 //! for GPU rendering. It handles touch input, keyboard events, and integrates
 //! with the Metal renderer shared with macOS.
 
-use super::{
-    events::{translate_key_press, translate_pan_to_scroll, translate_touch_to_mouse},
-    metal_renderer::MetalRenderer, BoolExt, CGPoint, CGRect, CGSize, UIEdgeInsets,
-};
 use super::metal_atlas::MetalAtlas;
-use crate::{
-    AnyWindowHandle, Bounds, Capslock, DispatchEventResult, GpuSpecs, Modifiers, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformWindow, Point, PromptButton,
-    PromptLevel, RequestFrameOptions, ScaledPixels, Scene, Size, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams, point, px, size,
-    platform::PlatformInputHandler,
+use super::{
+    events::{
+        translate_key_press, translate_modifiers_changed, translate_pan_to_scroll,
+        translate_touch_to_mouse, UIKeyModifierFlags,
+    },
+    metal_renderer::MetalRenderer,
+    BoolExt, CGPoint, CGRect, CGSize, UIEdgeInsets,
 };
+use crate::{
+    platform::PlatformInputHandler, point, px, size, AnyWindowHandle, Bounds, Capslock,
+    DispatchEventResult, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformInput, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
+    ScaledPixels, Scene, Size, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowParams,
+};
+use block::ConcreteBlock;
 use futures::channel::oneshot;
 use objc::{
     class,
@@ -26,11 +31,11 @@ use objc::{
 };
 use parking_lot::Mutex;
 use raw_window_handle::{
-    HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
-    UiKitDisplayHandle, UiKitWindowHandle,
+    HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, UiKitDisplayHandle,
+    UiKitWindowHandle,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::c_void,
     ptr,
     ptr::NonNull,
@@ -38,8 +43,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use super::IosDisplay;
 use super::metal_renderer::InstanceBufferPool;
+use super::IosDisplay;
 
 const WINDOW_STATE_IVAR: &str = "windowState";
 
@@ -175,7 +180,12 @@ extern "C" fn touches_ended(this: &Object, _sel: Sel, touches: *mut Object, _eve
     handle_touches(this, touches, "ended");
 }
 
-extern "C" fn touches_cancelled(this: &Object, _sel: Sel, touches: *mut Object, _event: *mut Object) {
+extern "C" fn touches_cancelled(
+    this: &Object,
+    _sel: Sel,
+    touches: *mut Object,
+    _event: *mut Object,
+) {
     handle_touches(this, touches, "cancelled");
 }
 
@@ -217,7 +227,12 @@ extern "C" fn presses_changed(this: &Object, _sel: Sel, presses: *mut Object, _e
     handle_presses(this, presses, true);
 }
 
-extern "C" fn presses_cancelled(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
+extern "C" fn presses_cancelled(
+    this: &Object,
+    _sel: Sel,
+    presses: *mut Object,
+    _event: *mut Object,
+) {
     handle_presses(this, presses, false);
 }
 
@@ -243,8 +258,20 @@ fn handle_presses(view: &Object, presses: *mut Object, is_key_down: bool) {
                 false
             };
 
+            // Update modifier state from hardware keyboard and dispatch ModifiersChangedEvent if changed
+            if !key.is_null() {
+                let modifier_flags: i64 = msg_send![key, modifierFlags];
+                let new_modifiers = UIKeyModifierFlags(modifier_flags).to_modifiers();
+                let old_modifiers = state.modifiers.lock().clone();
+                if new_modifiers != old_modifiers {
+                    *state.modifiers.lock() = new_modifiers;
+                    let modifiers_event = translate_modifiers_changed(modifier_flags);
+                    dispatch_event(state, modifiers_event);
+                }
+            }
+
             if let Some(event) = translate_key_press(press, is_key_down, is_repeat) {
-                dispatch_event(&state, event);
+                dispatch_event(state, event);
             }
         }
     }
@@ -351,10 +378,7 @@ extern "C" fn safe_area_insets_did_change(this: &Object, _sel: Sel) {
                     let bounds: CGRect = msg_send![view, bounds];
                     let size = bounds.size;
                     let scale = state.scale_factor.lock().clone();
-                    callback(
-                        size(px(size.width as f32), px(size.height as f32)),
-                        scale,
-                    );
+                    callback(size(px(size.width as f32), px(size.height as f32)), scale);
                 }
             }
         }
@@ -513,11 +537,12 @@ impl IosWindow {
 }
 
 impl HasWindowHandle for IosWindow {
-    fn window_handle(&self) -> std::result::Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+    fn window_handle(
+        &self,
+    ) -> std::result::Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+    {
         // UiKitWindowHandle::new takes the ui_view (not ui_window)
-        let mut handle = UiKitWindowHandle::new(
-            NonNull::new(self.view as *mut c_void).unwrap(),
-        );
+        let mut handle = UiKitWindowHandle::new(NonNull::new(self.view as *mut c_void).unwrap());
         handle.ui_view_controller = NonNull::new(self.view_controller as *mut c_void);
 
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::UiKit(handle)) })
@@ -525,9 +550,14 @@ impl HasWindowHandle for IosWindow {
 }
 
 impl HasDisplayHandle for IosWindow {
-    fn display_handle(&self) -> std::result::Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+    fn display_handle(
+        &self,
+    ) -> std::result::Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+    {
         Ok(unsafe {
-            raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::UiKit(UiKitDisplayHandle::new()))
+            raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::UiKit(
+                UiKitDisplayHandle::new(),
+            ))
         })
     }
 }
@@ -562,10 +592,11 @@ impl PlatformWindow for IosWindow {
         unsafe {
             let bounds: CGRect = msg_send![self.view, bounds];
             let insets: UIEdgeInsets = msg_send![self.view, safeAreaInsets];
+            let scale = self.scale_factor();
 
             size(
-                px((bounds.size.width - insets.left - insets.right) as f32),
-                px((bounds.size.height - insets.top - insets.bottom) as f32),
+                px((bounds.size.width - insets.left - insets.right) as f32 * scale),
+                px((bounds.size.height - insets.top - insets.bottom) as f32 * scale),
             )
         }
     }
@@ -594,10 +625,7 @@ impl PlatformWindow for IosWindow {
         // iOS doesn't have a persistent mouse position
         // Return center of the view as a reasonable default
         let bounds = self.bounds();
-        point(
-            bounds.size.width / 2.0,
-            bounds.size.height / 2.0,
-        )
+        point(bounds.size.width / 2.0, bounds.size.height / 2.0)
     }
 
     fn modifiers(&self) -> Modifiers {
@@ -618,14 +646,89 @@ impl PlatformWindow for IosWindow {
 
     fn prompt(
         &self,
-        _level: PromptLevel,
-        _msg: &str,
-        _detail: Option<&str>,
-        _answers: &[PromptButton],
+        level: PromptLevel,
+        msg: &str,
+        detail: Option<&str>,
+        answers: &[PromptButton],
     ) -> Option<oneshot::Receiver<usize>> {
-        // TODO: Implement UIAlertController with proper action handlers
-        // that capture tx and send the selected button index
-        None
+        // UIAlertControllerStyle constants
+        const UI_ALERT_CONTROLLER_STYLE_ALERT: isize = 1;
+
+        // UIAlertActionStyle constants
+        const UI_ALERT_ACTION_STYLE_DEFAULT: isize = 0;
+        const UI_ALERT_ACTION_STYLE_CANCEL: isize = 1;
+        const UI_ALERT_ACTION_STYLE_DESTRUCTIVE: isize = 2;
+
+        // Create CStrings for title and message (must be null-terminated for Objective-C)
+        let msg_cstring = std::ffi::CString::new(msg).unwrap_or_default();
+        let detail_cstring = detail.and_then(|d| std::ffi::CString::new(d).ok());
+
+        // Create UIAlertController
+        let alert_controller: *mut Object = unsafe {
+            let title_ns: *mut Object =
+                msg_send![class!(NSString), stringWithUTF8String: msg_cstring.as_ptr()];
+            let message_ns: *mut Object = match &detail_cstring {
+                Some(cstring) => {
+                    msg_send![class!(NSString), stringWithUTF8String: cstring.as_ptr()]
+                }
+                None => ptr::null_mut(),
+            };
+
+            msg_send![
+                class!(UIAlertController),
+                alertControllerWithTitle: title_ns
+                message: message_ns
+                preferredStyle: UI_ALERT_CONTROLLER_STYLE_ALERT
+            ]
+        };
+
+        let (done_tx, done_rx) = oneshot::channel();
+        let done_tx = Rc::new(Cell::new(Some(done_tx)));
+
+        // Add actions for each answer
+        for (index, answer) in answers.iter().enumerate() {
+            let action_style = match level {
+                PromptLevel::Critical if index == 0 => UI_ALERT_ACTION_STYLE_DESTRUCTIVE,
+                _ if answer.is_cancel() => UI_ALERT_ACTION_STYLE_CANCEL,
+                _ => UI_ALERT_ACTION_STYLE_DEFAULT,
+            };
+
+            let label_cstring = std::ffi::CString::new(answer.label()).unwrap_or_default();
+
+            let done_tx_clone = done_tx.clone();
+            let block = ConcreteBlock::new(move |_action: *mut Object| {
+                if let Some(tx) = done_tx_clone.take() {
+                    let _ = tx.send(index);
+                }
+            });
+            let block = block.copy();
+
+            unsafe {
+                let label_ns: *mut Object =
+                    msg_send![class!(NSString), stringWithUTF8String: label_cstring.as_ptr()];
+
+                let action: *mut Object = msg_send![
+                    class!(UIAlertAction),
+                    actionWithTitle: label_ns
+                    style: action_style
+                    handler: &*block
+                ];
+
+                let _: () = msg_send![alert_controller, addAction: action];
+            }
+        }
+
+        // Present the alert controller from the view controller
+        unsafe {
+            let _: () = msg_send![
+                self.view_controller,
+                presentViewController: alert_controller
+                animated: YES
+                completion: ptr::null::<c_void>()
+            ];
+        }
+
+        Some(done_rx)
     }
 
     fn activate(&self) {
