@@ -68,7 +68,6 @@ impl BoolExt for bool {
 /// Helper to create an NSString from a Rust string slice
 unsafe fn ns_string(string: &str) -> *mut objc::runtime::Object {
     use objc::class;
-    unsafe {
     let ns_string: *mut objc::runtime::Object = msg_send![class!(NSString), alloc];
     let ns_string: *mut objc::runtime::Object = msg_send![
         ns_string,
@@ -78,8 +77,7 @@ unsafe fn ns_string(string: &str) -> *mut objc::runtime::Object {
     ];
     let _: *mut objc::runtime::Object = msg_send![ns_string, autorelease];
     ns_string
-
-/// CGSize to Size<Pixels> conversion
+}
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct CGSize {

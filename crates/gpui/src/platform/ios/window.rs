@@ -404,12 +404,10 @@ extern "C" fn trait_collection_did_change(this: &Object, _sel: Sel, previous: *m
 }
 
 unsafe fn get_window_state(view: &Object) -> *const WindowState {
+    // May be null; callers must check the returned pointer before dereferencing.
     let state_ptr: *mut c_void = *view.get_ivar(WINDOW_STATE_IVAR);
-    // or null. Callers check for null before dereferencing.
-    let state_ptr: *mut c_void = unsafe { *view.get_ivar(WINDOW_STATE_IVAR) };
     state_ptr as *const WindowState
 }
-
 fn dispatch_event(state: &WindowState, event: PlatformInput) {
     if let Some(callback) = state.input_callback.lock().as_mut() {
         callback(event);
