@@ -29,11 +29,11 @@ struct IosPlatformState {
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
     renderer_context: renderer::Context,
-    
+
     // Callbacks
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     quit_callback: Option<Box<dyn FnMut()>>,
-    
+
     // Active windows tracking
     windows: Vec<AnyWindowHandle>,
 }
@@ -99,17 +99,12 @@ impl Platform for IosPlatform {
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
-        // On iOS, the run loop is managed by UIKit.
-        // We just call the finish launching callback immediately.
-        // The actual UIApplicationMain is called from the Objective-C/Swift entry point.
+        // On iOS, UIApplicationMain owns and manages the main run loop.
+        // Unlike macOS where we need to explicitly run NSRunLoop, on iOS
+        // the run loop is already running by the time this is called.
+        // We only need to invoke the finish launching callback and return
+        // immediately to avoid blocking the UIKit event handling.
         on_finish_launching();
-        
-        // Run the main run loop
-        // In a real iOS app, this would be handled by UIApplicationMain
-        unsafe {
-            let run_loop: *mut Object = msg_send![class!(NSRunLoop), mainRunLoop];
-            let _: () = msg_send![run_loop, run];
-        }
     }
 
     fn quit(&self) {
@@ -162,10 +157,10 @@ impl Platform for IosPlatform {
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
         let mut state = self.0.lock();
         state.windows.push(handle);
-        
+
         let renderer_context = state.renderer_context.clone();
         drop(state);
-        
+
         let window = IosWindow::new(handle, options, renderer_context)?;
         Ok(Box::new(window))
     }
@@ -176,7 +171,7 @@ impl Platform for IosPlatform {
             let screen: *mut Object = msg_send![class!(UIScreen), mainScreen];
             let trait_collection: *mut Object = msg_send![screen, traitCollection];
             let style: i64 = msg_send![trait_collection, userInterfaceStyle];
-            
+
             match style {
                 2 => WindowAppearance::Dark,      // UIUserInterfaceStyleDark
                 _ => WindowAppearance::Light,    // UIUserInterfaceStyleLight or Unspecified
@@ -301,7 +296,7 @@ impl Platform for IosPlatform {
     fn write_to_clipboard(&self, item: ClipboardItem) {
         unsafe {
             let pasteboard: *mut Object = msg_send![class!(UIPasteboard), generalPasteboard];
-            
+
             for entry in item.entries() {
                 match entry {
                     ClipboardEntry::String(s) => {
@@ -321,7 +316,7 @@ impl Platform for IosPlatform {
         unsafe {
             let pasteboard: *mut Object = msg_send![class!(UIPasteboard), generalPasteboard];
             let has_strings: bool = msg_send![pasteboard, hasStrings];
-            
+
             if has_strings {
                 let string: *mut Object = msg_send![pasteboard, string];
                 if !string.is_null() {
@@ -339,47 +334,33 @@ impl Platform for IosPlatform {
         }
     }
 
-    fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>> {
-        let url = url.to_string();
-        let username = username.to_string();
-        let password = password.to_vec();
-        
+    fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {
+        // TODO: Implement iOS Keychain support properly using the Security framework.
+        // The correct implementation requires:
+        // 1. Import Security framework CFString constants (kSecClass, kSecAttrService,
+        //    kSecAttrAccount, kSecValueData, etc.) rather than using string literals
+        //    like ns_string("kSecAttrService") which won't match the actual constants.
+        // 2. Use SecItemAdd for new entries and SecItemUpdate for existing ones.
+        // 3. Build a proper CFDictionary with the imported constant keys.
+        // 4. Handle the OSStatus return values from Security framework functions.
         self.background_executor().spawn(async move {
-            // Use iOS Keychain via Security framework
-            // This is a simplified implementation
-            unsafe {
-                let service = ns_string(&url);
-                let account = ns_string(&username);
-                
-                // Create query dictionary
-                let query: *mut Object = msg_send![class!(NSMutableDictionary), new];
-                let _: () = msg_send![query, setObject: service forKey: ns_string("kSecAttrService")];
-                let _: () = msg_send![query, setObject: account forKey: ns_string("kSecAttrAccount")];
-                
-                // For a full implementation, use Security framework's SecItemAdd
-                // This is a placeholder
-                Ok(())
-            }
+            Err(anyhow!("Keychain write_credentials not yet implemented for iOS"))
         })
     }
 
-    fn read_credentials(&self, url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
-        let _url = url.to_string();
-        
+    fn read_credentials(&self, _url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
+        // TODO: Implement iOS Keychain support properly using the Security framework.
+        // See write_credentials for details on the correct implementation approach.
         self.background_executor().spawn(async move {
-            // Use iOS Keychain via Security framework
-            // This is a placeholder implementation
-            Ok(None)
+            Err(anyhow!("Keychain read_credentials not yet implemented for iOS"))
         })
     }
 
-    fn delete_credentials(&self, url: &str) -> Task<Result<()>> {
-        let _url = url.to_string();
-        
+    fn delete_credentials(&self, _url: &str) -> Task<Result<()>> {
+        // TODO: Implement iOS Keychain support properly using the Security framework.
+        // See write_credentials for details on the correct implementation approach.
         self.background_executor().spawn(async move {
-            // Use iOS Keychain via Security framework
-            // This is a placeholder implementation
-            Ok(())
+            Err(anyhow!("Keychain delete_credentials not yet implemented for iOS"))
         })
     }
 }
@@ -395,7 +376,7 @@ impl IosKeyboardLayout {
         unsafe {
             // Get current input mode
             let text_input_mode: *mut Object = msg_send![class!(UITextInputMode), currentInputMode];
-            
+
             let (id, name) = if !text_input_mode.is_null() {
                 let primary_language: *mut Object = msg_send![text_input_mode, primaryLanguage];
                 if !primary_language.is_null() {
@@ -415,7 +396,7 @@ impl IosKeyboardLayout {
             } else {
                 ("en".to_string(), "English".to_string())
             };
-            
+
             Self { id, name }
         }
     }

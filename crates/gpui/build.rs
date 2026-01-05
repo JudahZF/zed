@@ -252,7 +252,6 @@ mod macos {
     }
 }
 
-<<<<<<< HEAD
 #[cfg(target_os = "windows")]
 mod windows {
     use std::{
@@ -540,6 +539,7 @@ mod ios {
             "Uniforms".into(),
             "AtlasTile".into(),
             "PathInputIndex".into(),
+            "PathRasterizationVertex".into(),
             "PathVertex_ScaledPixels".into(),
             "ShadowInputIndex".into(),
             "Shadow".into(),
@@ -585,7 +585,7 @@ mod ios {
 
     fn compile_metal_shaders(header_path: &Path) {
         use std::process::{self, Command};
-        
+
         // Use the same shader file as macOS - Metal shaders are compatible
         let shader_path = "./src/platform/mac/shaders.metal";
         let air_output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.air");
@@ -600,7 +600,7 @@ mod ios {
                 "iphoneos",
                 "metal",
                 "-gline-tables-only",
-                "-mios-version-min=17.0",
+                "-mios-version-min=26.0",
                 "-MO",
                 "-c",
                 shader_path,
@@ -613,8 +613,8 @@ mod ios {
             .unwrap();
 
         if !output.status.success() {
-            eprintln!(
-                "iOS metal shader compilation failed:\n{}",
+            println!(
+                "cargo::error=iOS metal shader compilation failed:\n{}",
                 String::from_utf8_lossy(&output.stderr)
             );
             process::exit(1);
@@ -629,8 +629,8 @@ mod ios {
             .unwrap();
 
         if !output.status.success() {
-            eprintln!(
-                "iOS metallib compilation failed:\n{}",
+            println!(
+                "cargo::error=iOS metallib compilation failed:\n{}",
                 String::from_utf8_lossy(&output.stderr)
             );
             process::exit(1);
