@@ -53,7 +53,7 @@ impl UIKeyModifierFlags {
             control: self.contains(Self::CONTROL),
             alt: self.contains(Self::ALTERNATE),
             shift: self.contains(Self::SHIFT),
-            platform: self.contains(Self::COMMAND),  // Command key on Apple platforms
+            platform: self.contains(Self::COMMAND),  // Platform modifier (Command key on Apple platforms)
             function: false,
         }
     }
