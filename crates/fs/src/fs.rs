@@ -359,7 +359,7 @@ impl FileHandle for std::fs::File {
 
         // SAFETY: `fcntl` will initialize the path buffer.
         let c_str = unsafe { CStr::from_ptr(path_buf.as_ptr().cast()) };
-        anyhow::ensure!(!c_str.is_empty(), "Could find a path for the file handle");
+        anyhow::ensure!(!c_str.is_empty(), "Couldn't find a path for the file handle");
         let path = PathBuf::from(OsStr::from_bytes(c_str.to_bytes()));
         Ok(path)
     }

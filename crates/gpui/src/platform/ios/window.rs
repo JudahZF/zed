@@ -162,8 +162,9 @@ unsafe fn register_view_controller_class() -> &'static Class {
 // Objective-C callback implementations
 
 extern "C" fn layer_class(_this: &Class, _sel: Sel) -> *const Class {
-    // Return regular CALayer, not CAMetalLayer
-    // We add the renderer's CAMetalLayer as a sublayer
+    // Return regular CALayer as the view's layer class. The Metal renderer's
+    // CAMetalLayer is added as a sublayer instead of making the view's root
+    // layer itself a CAMetalLayer.
     class!(CALayer)
 }
 

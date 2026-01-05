@@ -16,15 +16,14 @@ fn ios_log(message: &str) {
     
     // Also write to a log file in temp directory
     use std::io::Write;
-    if let Some(tmp_dir) = std::env::temp_dir().to_str() {
-        let log_path = format!("{}/zed_ios.log", tmp_dir);
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
-            let _ = writeln!(file, "[Zed Rust] {}", message);
-        }
+    let mut log_path = std::env::temp_dir();
+    log_path.push("zed_ios.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = writeln!(file, "[Zed Rust] {}", message);
     }
 }
 
@@ -51,7 +50,7 @@ impl ZedIosApp {
         
         assets::Assets
             .load_fonts(cx)
-            .expect("Failed to load fonts");
+            .map_err(|e| anyhow::anyhow!("Failed to load fonts: {}", e))?;
         ios_log("Fonts loaded");
         
         // List loaded font names
@@ -93,7 +92,7 @@ impl ZedIosApp {
 
 /// Entry point called from Objective-C app delegate.
 /// This function is marked #[no_mangle] so it can be called by name from main.m
-#[unsafe(no_mangle)]
+#[no_mangle]
 pub extern "C" fn zed_ios_init() {
     ios_log("zed_ios_init called");
     
