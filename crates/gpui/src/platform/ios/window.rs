@@ -13,6 +13,8 @@ use super::{
     metal_renderer::MetalRenderer,
     BoolExt, CGPoint, CGRect, CGSize, UIEdgeInsets,
 };
+use std::mem::ManuallyDrop;
+
 use crate::{
     platform::PlatformInputHandler, point, px, size, AnyWindowHandle, Bounds, Capslock,
     DispatchEventResult, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
@@ -384,8 +386,6 @@ extern "C" fn safe_area_insets_did_change(this: &Object, _sel: Sel) {
                 }
             }
         }
-
-        // Could notify about safe area changes here
     }
 }
 
@@ -441,6 +441,11 @@ pub struct IosWindow {
     view: *mut Object,
     view_controller: *mut Object,
     state: Arc<WindowState>,
+    /// Arc clones stored in the Objective-C ivars. We use ManuallyDrop so we can
+    /// explicitly drop them when the IosWindow is dropped, ensuring proper
+    /// reference counting regardless of UIKit's object lifecycle.
+    view_state_arc: ManuallyDrop<Arc<WindowState>>,
+    view_controller_state_arc: ManuallyDrop<Arc<WindowState>>,
 }
 
 
@@ -507,14 +512,17 @@ impl IosWindow {
                 scale_factor: Mutex::new(scale as f32),
             });
 
-            // Store state pointer in Objective-C objects
-            let state_ptr = Arc::as_ptr(&state) as *mut c_void;
-            (*view).set_ivar(WINDOW_STATE_IVAR, state_ptr);
-            (*view_controller).set_ivar(WINDOW_STATE_IVAR, state_ptr);
+            // Create separate Arc clones for each Objective-C object that will hold the state pointer.
+            // These are wrapped in ManuallyDrop so we control exactly when they're dropped,
+            // ensuring correct reference counting regardless of UIKit's object lifecycle.
+            let view_state_arc = ManuallyDrop::new(Arc::clone(&state));
+            let view_controller_state_arc = ManuallyDrop::new(Arc::clone(&state));
 
-            // Keep the Arc alive - increment for each ivar that holds the pointer
-            Arc::increment_strong_count(Arc::as_ptr(&state));
-            Arc::increment_strong_count(Arc::as_ptr(&state));
+            // Store state pointer in Objective-C objects
+            let state_ptr = Arc::as_ptr(&view_state_arc) as *mut c_void;
+            (*view).set_ivar(WINDOW_STATE_IVAR, state_ptr);
+            let vc_state_ptr = Arc::as_ptr(&view_controller_state_arc) as *mut c_void;
+            (*view_controller).set_ivar(WINDOW_STATE_IVAR, vc_state_ptr);
             // Set up the view hierarchy
             let _: () = msg_send![view_controller, setView: view];
             let _: () = msg_send![ui_window, setRootViewController: view_controller];
@@ -530,6 +538,8 @@ impl IosWindow {
                 view,
                 view_controller,
                 state,
+                view_state_arc,
+                view_controller_state_arc,
             })
         }
     }
@@ -835,7 +845,7 @@ impl PlatformWindow for IosWindow {
 impl Drop for IosWindow {
     fn drop(&mut self) {
         unsafe {
-            // Clear the state pointers
+            // Clear the state pointers in Objective-C objects
             (*self.view).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
             (*self.view_controller).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
 
@@ -844,10 +854,11 @@ impl Drop for IosWindow {
                 callback();
             }
 
-            // Decrement the Arc strong count for each ivar that held the pointer
-            // (we incremented twice in new() - once for view, once for view_controller)
-            Arc::decrement_strong_count(Arc::as_ptr(&self.state));
-            Arc::decrement_strong_count(Arc::as_ptr(&self.state));
+            // Drop the Arc clones that were stored for the Objective-C ivars.
+            // This correctly decrements the reference count regardless of whether
+            // UIKit has already released the view or view_controller objects.
+            ManuallyDrop::drop(&mut self.view_state_arc);
+            ManuallyDrop::drop(&mut self.view_controller_state_arc);
 
             // Hide the window
             let _: () = msg_send![self.ui_window, setHidden: YES];
