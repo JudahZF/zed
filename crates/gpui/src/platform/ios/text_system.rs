@@ -292,9 +292,16 @@ impl MacTextSystemState {
                 continue;
             }
 
+            let Some(postscript_name) = font.postscript_name() else {
+                log::error!(
+                    "Failed to get postscript name for font {:?}",
+                    font.full_name()
+                );
+                continue;
+            };
+
             let font_id = FontId(self.fonts.len());
             font_ids.push(font_id);
-            let postscript_name = font.postscript_name().unwrap();
             self.font_ids_by_postscript_name
                 .insert(postscript_name.clone(), font_id);
             self.postscript_names_by_font_id
