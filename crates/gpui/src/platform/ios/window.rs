@@ -206,7 +206,7 @@ fn handle_touches(view: &Object, touches: *mut Object, _phase: &str) {
             if let Some(event) = translate_touch_to_mouse(
                 touch,
                 view as *const Object as *mut Object,
-                state.modifiers.lock().clone(),
+                Modifiers::default(),
             ) {
                 dispatch_event(&state, event);
             }
@@ -443,7 +443,6 @@ pub struct IosWindow {
     state: Arc<WindowState>,
 }
 
-unsafe impl Send for IosWindow {}
 
 impl IosWindow {
     pub fn new(
