@@ -60,12 +60,40 @@ trait BoolExt {
 }
 
 impl BoolExt for bool {
+    /// Convert a Rust `bool` into an Objective-C `BOOL`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // `to_objc` is provided by the `BoolExt` trait implemented for `bool`.
+    /// assert_eq!(true.to_objc(), objc::runtime::YES);
+    /// assert_eq!(false.to_objc(), objc::runtime::NO);
+    /// ```
     fn to_objc(self) -> BOOL {
         if self { YES } else { NO }
     }
 }
 
-/// Helper to create an NSString from a Rust string slice
+/// Create an Objective-C `NSString` from a Rust `&str`.
+///
+/// The returned pointer is an autoreleased `NSString` object and is valid while the current
+/// Objective-C autorelease pool is in effect. The input `string` is encoded as UTF-8.
+///
+/// # Safety
+///
+/// The caller must ensure an Objective-C runtime and an active autorelease pool exist when this
+/// function is called. The returned pointer is a raw Objective-C object and must be used with
+/// Objective-C messaging conventions.
+///
+/// # Examples
+///
+/// ```
+/// # use std::ffi::c_void;
+/// # unsafe {
+/// let s = ns_string("hello");
+/// assert!(!s.is_null());
+/// # }
+/// ```
 unsafe fn ns_string(string: &str) -> *mut objc::runtime::Object {
     use objc::class;
     let ns_string: *mut objc::runtime::Object = msg_send![class!(NSString), alloc];
@@ -87,12 +115,33 @@ pub(crate) struct CGSize {
 
 // CGSize encoding for objc - {CGSize=dd} means struct with two doubles
 unsafe impl Encode for CGSize {
+    /// Objective-C type encoding for `CGSize`.
+    ///
+    /// Returns an `Encoding` representing the Objective-C type string "{CGSize=dd}".
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let _enc = CGSize::encode();
+    /// ```
     fn encode() -> Encoding {
         unsafe { Encoding::from_str("{CGSize=dd}") }
     }
 }
 
 impl From<CGSize> for Size<Pixels> {
+    /// Convert a `CGSize` to a `Size<Pixels>`.
+    ///
+    /// The `width` and `height` are cast to `f32` and converted to pixel units via `px`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let cg = CGSize { width: 10.0, height: 20.0 };
+    /// let size: Size<Pixels> = Size::from(cg);
+    /// assert_eq!(size.width.get(), 10.0f32);
+    /// assert_eq!(size.height.get(), 20.0f32);
+    /// ```
     fn from(value: CGSize) -> Self {
         Size {
             width: px(value.width as f32),
@@ -111,6 +160,14 @@ pub(crate) struct CGRect {
 
 // CGRect encoding for objc
 unsafe impl Encode for CGRect {
+    /// Objective-C runtime type encoding for `CGRect`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let enc = encode();
+    /// // `enc` encodes the Objective-C layout "{CGRect={CGPoint=dd}{CGSize=dd}}"
+    /// ```
     fn encode() -> Encoding {
         unsafe { Encoding::from_str("{CGRect={CGPoint=dd}{CGSize=dd}}") }
     }
@@ -126,18 +183,51 @@ pub(crate) struct CGPoint {
 
 // CGPoint encoding for objc
 unsafe impl Encode for CGPoint {
+    /// Returns the Objective-C type encoding for `CGPoint`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let enc = encode();
+    /// assert_eq!(enc, unsafe { objc::encode::Encoding::from_str("{CGPoint=dd}") });
+    /// ```
     fn encode() -> Encoding {
         unsafe { Encoding::from_str("{CGPoint=dd}") }
     }
 }
 
 impl From<CGRect> for Size<Pixels> {
+    /// Create a `Size<Pixels>` from a `CGRect`'s size.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let rect = CGRect {
+    ///     origin: CGPoint { x: 0.0, y: 0.0 },
+    ///     size: CGSize { width: 100.0, height: 50.0 },
+    /// };
+    /// let _size: Size<Pixels> = rect.into();
+    /// ```
     fn from(rect: CGRect) -> Self {
         size(px(rect.size.width as f32), px(rect.size.height as f32))
     }
 }
 
 impl From<CGRect> for Size<DevicePixels> {
+    /// Create a `Size<DevicePixels>` from a `CGRect` by converting the rect's width and height to device pixels.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let rect = CGRect {
+    ///     origin: CGPoint { x: 0.0, y: 0.0 },
+    ///     size: CGSize { width: 100.0, height: 200.0 },
+    /// };
+    /// let size: Size<DevicePixels> = rect.into();
+    /// let Size { width, height } = size;
+    /// assert_eq!(width, DevicePixels(100));
+    /// assert_eq!(height, DevicePixels(200));
+    /// ```
     fn from(rect: CGRect) -> Self {
         size(
             DevicePixels(rect.size.width as i32),

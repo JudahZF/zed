@@ -6,6 +6,21 @@
 
 use std::env;
 
+/// Build script entrypoint that prepares platform-specific bindings and shaders.
+///
+/// Emits a cargo config enabling GLES, runs WGSL shader validation when applicable,
+/// and dispatches to the appropriate platform build routine (macOS, iOS when cross-compiling from macOS, or Windows)
+/// based on the `CARGO_CFG_TARGET_OS` environment variable.
+///
+/// # Examples
+///
+/// ```
+/// // In a build-script context this is invoked by Cargo; calling directly demonstrates behavior.
+/// // Note: running this example in a normal test environment may have side effects (file writes, compiler calls).
+/// fn run_build_script() {
+///     crate::main();
+/// }
+/// ```
 fn main() {
     let target = env::var("CARGO_CFG_TARGET_OS");
     println!("cargo::rustc-check-cfg=cfg(gles)");
@@ -482,6 +497,37 @@ mod windows {
         }
     }
 
+    /// Appends a Rust `const` byte-slice binding to `output_path` by extracting the byte-array initializer
+    /// from a generated C header.
+    ///
+    /// Reads `head_file`, locates the first `const BYTE ... = { ... };` initializer, converts the `{}`-style
+    /// C array initializer to Rust `[]` syntax, and appends a line of the form
+    /// `const <const_name>: &[u8] = &[...]` to `output_path`.
+    ///
+    /// # Parameters
+    ///
+    /// - `const_name`: Identifier to use for the generated Rust `const`.
+    /// - `head_file`: Path to the C header that contains a `const BYTE` array definition.
+    /// - `output_path`: Path to the Rust source file to which the const binding will be appended.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::fs;
+    /// use std::io::Write;
+    /// let hdr = "temp_shader.h";
+    /// let out = "temp_bindings.rs";
+    /// let _ = fs::remove_file(hdr);
+    /// let _ = fs::remove_file(out);
+    /// fs::write(hdr, "const BYTE SHADER_BYTES[] = { 1, 2, 3, 4 };").unwrap();
+    /// // Ensure output file exists
+    /// fs::File::create(out).unwrap();
+    /// generate_rust_binding("SHADER_BYTES", hdr, out);
+    /// let contents = fs::read_to_string(out).unwrap();
+    /// assert!(contents.contains("const SHADER_BYTES: &[u8] = &[ 1, 2, 3, 4 ]"));
+    /// fs::remove_file(hdr).unwrap();
+    /// fs::remove_file(out).unwrap();
+    /// ```
     fn generate_rust_binding(const_name: &str, head_file: &str, output_path: &str) {
         let header_content = fs::read_to_string(head_file).expect("Failed to read header file");
         let const_definition = {
@@ -516,11 +562,35 @@ mod ios {
 
     use cbindgen::Config;
 
+    /// Execute the iOS-specific build steps to generate C shader bindings and compile Metal shaders.
+    ///
+    /// This runs the iOS build pipeline: it produces the C header with exposed shader bindings and then compiles the Metal shaders into the final artifacts.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // invoked from build.rs when targeting iOS on a macOS host
+    /// ios::build();
+    /// ```
     pub(super) fn build() {
         let header_path = generate_shader_bindings();
         compile_metal_shaders(&header_path);
     }
 
+    /// Generates a C header that exposes a curated set of Rust types for use by the Metal shader pipeline and writes it to OUT_DIR/scene.h.
+    ///
+    /// The function runs cbindgen with a tailored configuration (C language, header guard `SCENE_H`, no includes, enumerations prefixed with their type name), exports a fixed list of types, registers rerun hints for the source files used, and writes the resulting header to the build output directory.
+    ///
+    /// # Returns
+    ///
+    /// The `PathBuf` pointing to the generated header file (OUT_DIR/scene.h).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let header_path = generate_shader_bindings();
+    /// assert!(header_path.to_string_lossy().ends_with("scene.h"));
+    /// ```
     fn generate_shader_bindings() -> PathBuf {
         let output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("scene.h");
         let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -586,6 +656,18 @@ mod ios {
         output_path
     }
 
+    /// Compiles the project's Metal shaders for iOS and produces an `.air` and `.metallib` in `OUT_DIR`.
+    ///
+    /// The provided `header_path` is passed to the compiler with `-include` so the generated header is available to the shader compiler. The function emits a `cargo:rerun-if-changed=` hint for the Metal shader source and exits the process with status 1 if either the Metal or metallib compilation step fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    /// let header = Path::new(std::env::var("OUT_DIR").unwrap().as_str()).join("scene.h");
+    /// // header must exist; this example demonstrates the call site without running the compiler
+    /// super::compile_metal_shaders(&header);
+    /// ```
     fn compile_metal_shaders(header_path: &Path) {
         use std::process::{self, Command};
 

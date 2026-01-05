@@ -21,7 +21,17 @@ unsafe impl Send for IosDisplay {}
 unsafe impl Sync for IosDisplay {}
 
 impl IosDisplay {
-    /// Get the main screen (the device's built-in display).
+    /// Obtain the device's built-in main screen wrapped as an `IosDisplay`.
+    ///
+    /// Returns an `IosDisplay` that wraps the primary device `UIScreen`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let main = IosDisplay::main();
+    /// // `main` represents the primary device screen; scale should be >= 1.0 on iOS devices
+    /// assert!(main.scale() >= 1.0);
+    /// ```
     pub fn main() -> Self {
         unsafe {
             let screen: *mut Object = msg_send![class!(UIScreen), mainScreen];
@@ -29,7 +39,14 @@ impl IosDisplay {
         }
     }
 
-    /// Get all available screens (main + any external displays).
+    /// Enumerates all available screens (main and any external displays) and returns them as `IosDisplay` instances.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let displays = gpui::platform::ios::display::IosDisplay::all();
+    /// assert!(!displays.is_empty());
+    /// ```
     pub fn all() -> Vec<Self> {
         unsafe {
             let screens: *mut Object = msg_send![class!(UIScreen), screens];
@@ -44,23 +61,64 @@ impl IosDisplay {
         }
     }
 
-    /// Get the native bounds of the screen in pixels.
+    /// Provide the screen's native bounds in pixels.
+    ///
+    /// # Returns
+    ///
+    /// The screen's native bounding rectangle in pixels as a `CGRect`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let screen = IosDisplay::main();
+    /// let native = screen.native_bounds();
+    /// // `native` is a CGRect representing the screen size in physical pixels.
+    /// ```
     pub fn native_bounds(&self) -> CGRect {
         unsafe { msg_send![self.screen, nativeBounds] }
     }
 
-    /// Get the bounds of the screen in points.
+    /// The screen's bounds measured in points.
+    ///
+    /// Coordinates and dimensions are expressed in UIKit points (not pixels).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let bounds = IosDisplay::main().bounds_in_points();
+    /// assert!(bounds.size.width > 0.0);
+    /// ```
     pub fn bounds_in_points(&self) -> CGRect {
         unsafe { msg_send![self.screen, bounds] }
     }
 
-    /// Get the scale factor of the screen (e.g., 2.0 for Retina, 3.0 for Super Retina).
+    /// Retrieve the screen's scale factor (pixel-per-point ratio).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let scale = IosDisplay::main().scale();
+    /// assert!(scale >= 1.0);
+    /// ```
     pub fn scale(&self) -> f64 {
         unsafe { msg_send![self.screen, scale] }
     }
 }
 
 impl PlatformDisplay for IosDisplay {
+    /// Computes a stable display identifier based on the wrapped UIScreen pointer.
+    ///
+    /// The identifier is produced by hashing the raw screen pointer; it is stable for the
+    /// lifetime of the running application but not guaranteed persistent across launches.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let display = IosDisplay::main();
+    /// let id1 = display.id();
+    /// let id2 = display.id();
+    /// assert_eq!(id1, id2);
+    /// ```
     fn id(&self) -> DisplayId {
         // iOS doesn't have a direct equivalent to CGDirectDisplayID,
         // so we use a hash of the screen pointer as an identifier.
@@ -72,6 +130,22 @@ impl PlatformDisplay for IosDisplay {
         DisplayId(hasher.finish() as u32)
     }
 
+    /// Generates a deterministic UUID for this screen from its native pixel bounds and scale.
+    ///
+    /// The UUID is derived from the screen's nativeBounds (width and height) and scale and is stable for the lifetime of the process.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Uuid)` containing the generated UUID.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Example: obtain a UUID for the main screen
+    /// let display = IosDisplay::main();
+    /// let id = display.uuid().unwrap();
+    /// assert_ne!(id, uuid::Uuid::nil());
+    /// ```
     fn uuid(&self) -> Result<Uuid> {
         // iOS doesn't provide persistent display UUIDs like macOS does.
         // We generate a deterministic UUID based on the screen properties.
@@ -92,6 +166,20 @@ impl PlatformDisplay for IosDisplay {
         }
     }
 
+    /// Converts the display's point-based bounds into pixel-based bounds using the display scale.
+    ///
+    /// # Returns
+    ///
+    /// A `Bounds<Pixels>` where width and height are the point bounds multiplied by the display scale,
+    /// and the origin is the default (zero).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// let display = IosDisplay::main();
+    /// let pixel_bounds = display.bounds();
+    /// // pixel_bounds.size.width and pixel_bounds.size.height are in pixels
+    /// ```
     fn bounds(&self) -> Bounds<Pixels> {
         let bounds = self.bounds_in_points();
         let scale = self.scale() as f32;

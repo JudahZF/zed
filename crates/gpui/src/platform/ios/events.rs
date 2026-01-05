@@ -44,10 +44,43 @@ impl UIKeyModifierFlags {
     pub const COMMAND: i64 = 1 << 20;
     pub const NUMERIC_PAD: i64 = 1 << 21;
 
+    /// Returns whether a specific modifier flag is set in this flag mask.
+    ///
+    /// # Parameters
+    ///
+    /// - `flag`: a modifier flag mask to test against this value.
+    ///
+    /// # Returns
+    ///
+    /// `true` if `flag` is present in this mask, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let flags = UIKeyModifierFlags(UIKeyModifierFlags::SHIFT | UIKeyModifierFlags::CONTROL);
+    /// assert!(flags.contains(UIKeyModifierFlags::SHIFT));
+    /// assert!(!flags.contains(UIKeyModifierFlags::ALTERNATE));
+    /// ```
     pub fn contains(&self, flag: i64) -> bool {
         (self.0 & flag) != 0
     }
 
+    /// Convert iOS UIKey modifier flags into a GPUI `Modifiers` value.
+    ///
+    /// Returns a `Modifiers` struct with `control`, `alt`, `shift`, and `platform` fields set according
+    /// to the corresponding iOS flags (`CONTROL`, `ALTERNATE`, `SHIFT`, `COMMAND`). The `function`
+    /// field is always set to `false`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let flags = UIKeyModifierFlags(UIKeyModifierFlags::SHIFT | UIKeyModifierFlags::CONTROL);
+    /// let mods = flags.to_modifiers();
+    /// assert!(mods.shift);
+    /// assert!(mods.control);
+    /// assert!(!mods.alt);
+    /// assert!(!mods.platform);
+    /// ```
     pub fn to_modifiers(&self) -> Modifiers {
         Modifiers {
             control: self.contains(Self::CONTROL),
@@ -59,10 +92,26 @@ impl UIKeyModifierFlags {
     }
 }
 
-/// Translate a UITouch to a GPUI mouse event.
+/// Convert a single `UITouch` into a GPUI mouse event, treating single touches as left-button interactions.
 ///
-/// Single touches are treated as left mouse button events.
-/// This provides basic interaction support with the existing mouse-based UI.
+/// Maps touch phases as follows:
+/// - `Began` -> `MouseDown`
+/// - `Moved` -> `MouseMove` (left button reported as pressed)
+/// - `Ended` / `Cancelled` -> `MouseUp`
+/// - `Stationary` -> no event (`None`)
+///
+/// # Returns
+///
+/// `Some(PlatformInput)` with the corresponding mouse event, or `None` if the touch phase is `Stationary` or unrecognized.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Typical usage: attempt to translate an iOS touch to a GPUI mouse event.
+/// if let Some(event) = translate_touch_to_mouse(touch_ptr, view_ptr, modifiers) {
+///     handle_platform_input(event);
+/// }
+/// ```
 pub fn translate_touch_to_mouse(
     touch: *mut Object,
     view: *mut Object,
@@ -109,7 +158,21 @@ pub fn translate_touch_to_mouse(
     }
 }
 
-/// Translate a UIPanGestureRecognizer state to a scroll event.
+/// Translate a UIPanGestureRecognizer into a GPUI scroll wheel event when the gesture is active.
+///
+/// The function reads the gesture's location and translation in the given view, converts them to
+/// GPUI coordinates, resets the gesture's translation so deltas are incremental, and maps the
+/// gesture recognizer state to a `GpuiTouchPhase`. Returns a `ScrollWheel` event containing the
+/// position, delta (in pixels), modifiers, and touch phase for Began/Changed/Ended/Cancelled
+/// states; returns `None` for other states or if the gesture state is unsupported.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::ptr::null_mut;
+/// // Callers must ensure valid Objective-C objects in real use; this example is illustrative.
+/// let _ = unsafe { translate_pan_to_scroll(null_mut(), null_mut(), Modifiers::empty()) };
+/// ```
 pub fn translate_pan_to_scroll(
     gesture: *mut Object,
     view: *mut Object,
@@ -143,7 +206,18 @@ pub fn translate_pan_to_scroll(
     }
 }
 
-/// Translate a UIKey press to a GPUI keyboard event.
+/// Translate a UIKey press into a GPUI keyboard PlatformInput.
+///
+/// Returns a `PlatformInput::KeyDown` (with `is_held` set to `is_repeat`) when `is_key_down` is
+/// true, a `PlatformInput::KeyUp` when `is_key_down` is false, or `None` if the underlying
+/// `UIKey` object is not available.
+///
+/// # Examples
+///
+/// ```
+/// // Unsafe: passing a valid Objective-C `UIPress` pointer is required.
+/// // let result = unsafe { translate_key_press(press_ptr, true, false) };
+/// ```
 pub fn translate_key_press(
     press: *mut Object,
     is_key_down: bool,
@@ -205,7 +279,17 @@ pub fn translate_key_press(
     }
 }
 
-/// Translate a modifier flags change to a modifiers changed event.
+/// Convert raw iOS modifier flags into a `ModifiersChanged` platform event.
+///
+/// The returned `PlatformInput::ModifiersChanged` contains the translated `Modifiers` and a
+/// `Capslock` value whose `on` field is true when the `ALPHA_SHIFT` flag is set.
+///
+/// # Examples
+///
+/// ```
+/// let evt = translate_modifiers_changed(0);
+/// assert!(matches!(evt, PlatformInput::ModifiersChanged(_)));
+/// ```
 pub fn translate_modifiers_changed(modifier_flags: i64) -> PlatformInput {
     let modifiers = UIKeyModifierFlags(modifier_flags).to_modifiers();
     PlatformInput::ModifiersChanged(ModifiersChangedEvent { 
@@ -214,8 +298,22 @@ pub fn translate_modifiers_changed(modifier_flags: i64) -> PlatformInput {
     })
 }
 
-/// Map iOS key codes (UIKeyboardHIDUsage) to key strings.
-/// Based on USB HID Usage Tables.
+/// Convert a USB HID (UIKeyboardHIDUsage) key code into a human-readable key string.
+///
+/// Letters map to "a" through "z"; digits map to "1" through "0"; common punctuation,
+/// function, navigation, and modifier keys map to conventional names. Unknown codes
+/// produce `unknown-<code>`.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(key_code_to_string(0x04), "a");      // 'a'
+/// assert_eq!(key_code_to_string(0x1E), "1");      // '1'
+/// assert_eq!(key_code_to_string(0x27), "0");      // '0'
+/// assert_eq!(key_code_to_string(0x3A), "f1");     // F1
+/// assert_eq!(key_code_to_string(0x28), "enter");  // Enter
+/// assert!(key_code_to_string(0xFFFF).starts_with("unknown-"));
+/// ```
 fn key_code_to_string(key_code: i64) -> String {
     match key_code {
         // Letters

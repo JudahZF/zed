@@ -80,6 +80,15 @@ struct MacTextSystemState {
 }
 
 impl MacTextSystem {
+    /// Creates a new, empty MacTextSystem backed by fresh internal state.
+    ///
+    /// The returned instance contains empty memory and system font sources and cleared font caches.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let ts = MacTextSystem::new();
+    /// ```
     pub(crate) fn new() -> Self {
         Self(RwLock::new(MacTextSystemState {
             memory_source: MemSource::empty(),
@@ -94,16 +103,46 @@ impl MacTextSystem {
 }
 
 impl Default for MacTextSystem {
+    /// Creates the default value for this type.
+    ///
+    /// # Returns
+    ///
+    /// `Self` initialized with the type's default configuration.
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl PlatformTextSystem for MacTextSystem {
+    /// Adds the given font data to the text system's in-memory font source.
+    ///
+    /// Each entry in `fonts` is a font file's bytes (owned or borrowed) that will be registered for use by the text system.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if all fonts were added successfully, `Err` if an error occurred while loading any font.
     fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.0.write().add_fonts(fonts)
     }
 
+    /// Collects available font family names from the system and from in-memory fonts.
+    ///
+    /// Queries CoreText for all family descriptors, extracts family names using
+    /// lenient attribute access, and appends any families currently registered in
+    /// the in-memory font source.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<String>` containing font family names discovered from the system and
+    /// in-memory fonts. The vector may be empty if no names could be retrieved.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Obtain a MacTextSystem instance from the surrounding context and list families.
+    /// let names: Vec<String> = /* mac_text_system */.all_font_names();
+    /// println!("Found {} font families", names.len());
+    /// ```
     fn all_font_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         let collection = core_text::font_collection::create_for_all_families();
@@ -119,6 +158,24 @@ impl PlatformTextSystem for MacTextSystem {
         names
     }
 
+    /// Resolve the best-matching `FontId` for the given `Font` request.
+    ///
+    /// Looks up a cached selection and returns it if present; otherwise it loads
+    /// candidate fonts for the requested family (including memory and system
+    /// sources), evaluates their properties against the requested style/weight,
+    /// selects the best match, caches that selection, and returns its `FontId`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if font family loading or best-match selection fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // `text_system` implements this method and `font` is a Font request.
+    /// // This demonstrates the common usage pattern.
+    /// let id = text_system.font_id(&font).unwrap();
+    /// ```
     fn font_id(&self, font: &Font) -> Result<FontId> {
         let lock = self.0.upgradable_read();
         if let Some(font_id) = lock.font_selections.get(font) {
@@ -159,28 +216,95 @@ impl PlatformTextSystem for MacTextSystem {
         }
     }
 
+    /// Retrieves the typographic metrics for the specified font.
+    ///
+    /// The returned `FontMetrics` contains values such as ascent, descent, line gap,
+    /// units-per-em, and the font's bounding box.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // `system` must be an initialized MacTextSystem and `id` a valid FontId.
+    /// let metrics = system.font_metrics(id);
+    /// assert!(metrics.units_per_em > 0);
+    /// ```
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
         self.0.read().fonts[font_id.0].metrics().into()
     }
 
+    /// Returns the typographic bounding box for a glyph in the given font.
+    ///
+    — /// The returned bounds describe the glyph's typographic extents in font units converted to `f32`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assume `sys` implements the same trait and types are in scope.
+    /// let bounds = sys.typographic_bounds(FontId(0), GlyphId(0)).unwrap();
+    /// // Bounds should be a finite rectangle (width/height may be zero for empty glyphs).
+    /// assert!(bounds.size.width.is_finite());
+    /// ```
     fn typographic_bounds(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Bounds<f32>> {
         Ok(self.0.read().fonts[font_id.0]
             .typographic_bounds(glyph_id.0)?
             .into())
     }
 
+    /// Get the glyph advance (horizontal and vertical advance) for a glyph in a font.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Size<f32>)` containing the glyph's advance (x and y) in logical pixels; `Err` if the requested font or glyph cannot be resolved.
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
         self.0.read().advance(font_id, glyph_id)
     }
 
+    /// Maps a Unicode character to the glyph identifier used by the specified font.
+    ///
+    /// Returns `Some(GlyphId)` if the font provides a glyph for `ch`, `None` if the character has no glyph in that font.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // `ts` is a MacTextSystem; `font_id` is a FontId obtained from the text system.
+    /// let glyph = ts.glyph_for_char(font_id, 'a');
+    /// match glyph {
+    ///     Some(gid) => println!("Glyph id: {:?}", gid),
+    ///     None => println!("No glyph for character"),
+    /// }
+    /// ```
     fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId> {
         self.0.read().glyph_for_char(font_id, ch)
     }
 
+    /// Computes the device-pixel bounding rectangle required to rasterize the specified glyph.
+    ///
+    /// Returns the smallest axis-aligned `Bounds<DevicePixels>` that fully contains the glyph's
+    /// raster area for the provided `RenderGlyphParams`, taking scale and subpixel positioning
+    /// into account.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // `text_system` is a `MacTextSystem` and `params` is a prepared `RenderGlyphParams`.
+    /// // let bounds = text_system.glyph_raster_bounds(&params).unwrap();
+    /// ```
     fn glyph_raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         self.0.read().raster_bounds(params)
     }
 
+    /// Rasterizes a single glyph into a pixel bitmap using the provided render parameters and raster bounds.
+    ///
+    /// # Returns
+    ///
+    /// A tuple `(Size<DevicePixels>, Vec<u8>)` with the bitmap size and the raw pixel bytes. Color emoji glyphs are returned as BGRA straight-alpha pixels; non-color glyphs are returned as grayscale bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Assume `text_system` is a MacTextSystem and `params` and `bounds` are prepared:
+    /// // let (size, pixels) = text_system.rasterize_glyph(&params, bounds).unwrap();
+    /// ```
     fn rasterize_glyph(
         &self,
         glyph_id: &RenderGlyphParams,
@@ -189,12 +313,47 @@ impl PlatformTextSystem for MacTextSystem {
         self.0.read().rasterize_glyph(glyph_id, raster_bounds)
     }
 
+    /// Layout a single line of text into shaped runs using the supplied font runs.
+    ///
+    /// The returned `LineLayout` contains shaped runs, glyph positions, typographic bounds,
+    /// and the original text length for the laid-out line.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // `text_system` is a `MacTextSystem` previously created and configured.
+    /// let layout = text_system.layout_line("Hello, world!", 12.0.into(), &[]);
+    /// assert_eq!(layout.text_length, "Hello, world!".len());
+    /// ```
     fn layout_line(&self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
         self.0.write().layout_line(text, font_size, font_runs)
     }
 }
 
 impl MacTextSystemState {
+    /// Adds fonts to the internal memory font source from either embedded slices or owned byte buffers.
+    ///
+    /// Accepts a list of font data items where each item is either a borrowed byte slice (embedded font)
+    /// or an owned byte buffer. Embedded slices are converted through Core Graphics/Core Text into a
+    /// memory handle; owned buffers are registered directly. Returns `Ok(())` if all fonts were loaded
+    /// and registered successfully, or an `Err` if any font failed to be converted or if registration
+    /// into the memory source failed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::borrow::Cow;
+    ///
+    /// // Add an owned font blob
+    /// let owned_font: Vec<u8> = vec![/* font bytes */];
+    /// let fonts = vec![Cow::Owned(owned_font)];
+    /// // state.add_fonts(fonts).unwrap();
+    ///
+    /// // Add an embedded/font slice
+    /// // let embedded: &'static [u8] = include_bytes!("SomeFont.ttf");
+    /// // let fonts = vec![Cow::Borrowed(embedded)];
+    /// // state.add_fonts(fonts).unwrap();
+    /// ```
     fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         let fonts = fonts
             .into_iter()
@@ -215,6 +374,27 @@ impl MacTextSystemState {
         Ok(())
     }
 
+    /// Loads and fonts for a family name, applies font features and optional fallbacks, and registers the loaded fonts.
+    ///
+    /// Attempts to load the family from the in-memory source first, falling back to the system source. For each successfully loaded font this registers a new `FontId`, records mappings by PostScript name, and returns the assigned `FontId`s. Fonts lacking required glyphs, readable trait values, or a PostScript name are skipped; ".SystemUIFont" is normalized to ".AppleSystemUIFont".
+    ///
+    /// # Parameters
+    ///
+    /// - `name` — family name to load (".SystemUIFont" is normalized to ".AppleSystemUIFont").
+    /// - `features` — OpenType features to apply to each loaded font.
+    /// - `fallbacks` — optional fallback font configuration to apply.
+    ///
+    /// # Returns
+    ///
+    /// A `SmallVec<[FontId; 4]>` containing the `FontId`s of the fonts successfully loaded and registered.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Load fonts for the "Helvetica" family with default features and no fallbacks.
+    /// let font_ids = state.load_family("Helvetica", &FontFeatures::default(), None).unwrap();
+    /// assert!(!font_ids.is_empty());
+    /// ```
     fn load_family(
         &mut self,
         name: &str,
@@ -311,14 +491,44 @@ impl MacTextSystemState {
         Ok(font_ids)
     }
 
+    /// Get the advance size for a glyph in the specified font.
+    ///
+    /// # Returns
+    ///
+    /// `Size<f32>` containing the horizontal and vertical advance for the glyph, or an error if the font-kit query fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Assuming `state`, `font_id`, and `glyph_id` are available:
+    /// let size = state.advance(font_id, glyph_id).unwrap();
+    /// assert!(size.width >= 0.0);
+    /// ```
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>> {
         Ok(self.fonts[font_id.0].advance(glyph_id.0)?.into())
     }
 
+    /// Retrieve the glyph identifier for a Unicode character in the specified font.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assume `state` is a MacTextSystemState with loaded fonts and `fid` a valid `FontId`.
+    /// let gid = state.glyph_for_char(fid, 'a');
+    /// ```
     fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId> {
         self.fonts[font_id.0].glyph_for_char(ch).map(GlyphId)
     }
 
+    /// Resolve or register the given native Core Text font and return its corresponding FontId.
+    ///
+    /// If the font's PostScript name is already known, the existing FontId is returned. Otherwise a
+    /// new FontId is created, the PostScript name is recorded, and a FontKit `Font` wrapper is
+    /// constructed from the provided `CTFont` and stored.
+    ///
+    /// # Returns
+    ///
+    /// The `FontId` associated with the provided `CTFont`.
     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
         let postscript_name = requested_font.postscript_name();
         if let Some(font_id) = self.font_ids_by_postscript_name.get(&postscript_name) {
@@ -337,6 +547,18 @@ impl MacTextSystemState {
         }
     }
 
+    /// Determines whether the specified font is Apple's color emoji font.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the font's PostScript name is "AppleColorEmoji" or ".AppleColorEmojiUI", `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // `state` is a MacTextSystemState and `font_id` obtained from it.
+    /// // let is_emoji = state.is_emoji(font_id);
+    /// ```
     fn is_emoji(&self, font_id: FontId) -> bool {
         self.postscript_names_by_font_id
             .get(&font_id)
@@ -345,6 +567,17 @@ impl MacTextSystemState {
             })
     }
 
+    /// Computes the pixel bounds required to rasterize a glyph using the provided render parameters.
+    ///
+    /// The returned bounds are in device pixels and reflect the font size and scale factor from `params`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Assuming `state: &MacTextSystemState` and `params: RenderGlyphParams` are available:
+    /// let bounds = state.raster_bounds(&params).unwrap();
+    /// println!("Glyph raster bounds: {:?}", bounds);
+    /// ```
     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         let font = &self.fonts[params.font_id.0];
         let scale = Transform2F::from_scale(params.scale_factor);
@@ -359,6 +592,19 @@ impl MacTextSystemState {
             .into())
     }
 
+    /// Rasterizes a single glyph into a pixel bitmap.
+    ///
+    /// Returns the bitmap size and a flat pixel buffer. For emoji glyphs the buffer contains
+    /// 4-byte pixels in BGRA order with straight alpha; for non-emoji glyphs the buffer contains
+    /// one byte per pixel (grayscale). Returns an `Err` if `glyph_bounds` has zero width or height.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Prepare RenderGlyphParams and glyph_bounds appropriately, then:
+    /// let (size, pixels) = text_system.rasterize_glyph(&params, glyph_bounds)?;
+    /// // `size` is the bitmap dimensions; `pixels` is the raw pixel data as described above.
+    /// ```
     fn rasterize_glyph(
         &self,
         params: &RenderGlyphParams,
@@ -445,6 +691,20 @@ impl MacTextSystemState {
         }
     }
 
+    /// Layouts and shapes a single line of text using the provided font runs.
+    ///
+    /// Produces a LineLayout that contains shaped runs (per-font glyph sequences with positions),
+    /// maps glyphs back to UTF-8 string indices, marks glyphs coming from emoji fonts,
+    /// and reports typographic metrics (width, ascent, descent) for the shaped line.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // `state` must be a MacTextSystemState (with fonts loaded) in scope.
+    /// // This demonstrates the API usage; test harness must provide a valid state.
+    /// let layout = state.layout_line("hello", Pixels(12.0), &[]);
+    /// assert_eq!(layout.len, 5);
+    /// ```
     fn layout_line(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
         // Construct the attributed string, converting UTF8 ranges to UTF16 ranges.
         let mut string = CFMutableAttributedString::new();
@@ -541,6 +801,28 @@ struct StringIndexConverter<'a> {
 }
 
 impl<'a> StringIndexConverter<'a> {
+    /// Creates a new StringIndexConverter for `text`.
+    ///
+    /// The converter starts with both the UTF-8 and UTF-16 indices set to 0 and
+    /// can be advanced to map between UTF-8 and UTF-16 positions within `text`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut conv = StringIndexConverter::new("a𐐷"); // 'a' + U+10437 (surrogate pair in UTF-16)
+    /// assert_eq!(conv.utf8_ix, 0);
+    /// assert_eq!(conv.utf16_ix, 0);
+    ///
+    /// conv.advance_to_utf8_ix(1);
+    /// // After advancing to byte index 1, utf16 index should be 1 (the 'a')
+    /// assert_eq!(conv.utf8_ix, 1);
+    /// assert_eq!(conv.utf16_ix, 1);
+    ///
+    /// conv.advance_to_utf8_ix(4);
+    /// // The 2nd character is a 4-byte UTF-8 code point, counting as two UTF-16 units
+    /// assert_eq!(conv.utf8_ix, 4);
+    /// assert_eq!(conv.utf16_ix, 3);
+    /// ```
     fn new(text: &'a str) -> Self {
         Self {
             text,
@@ -549,6 +831,18 @@ impl<'a> StringIndexConverter<'a> {
         }
     }
 
+    /// Advance the converter's position until the internal UTF-8 index is at or past `utf8_target`,
+    /// keeping the UTF-16 index in sync with the traversed characters.
+    ///
+    /// If `utf8_target` is greater than the text length, the UTF-8 index is set to the end of the text.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut conv = StringIndexConverter::new("a\u{1F600}b"); // "a😀b"
+    /// // advance to the byte index of the second character (the emoji starts at byte index 1)
+    /// conv.advance_to_utf8_ix(1);
+    /// ```
     fn advance_to_utf8_ix(&mut self, utf8_target: usize) {
         for (ix, c) in self.text[self.utf8_ix..].char_indices() {
             if self.utf8_ix + ix >= utf8_target {
@@ -560,6 +854,21 @@ impl<'a> StringIndexConverter<'a> {
         self.utf8_ix = self.text.len();
     }
 
+    /// Advance the converter's indices forward until the UTF-16 index reaches the target.
+    ///
+    /// Advances both `utf16_ix` and `utf8_ix` from their current positions by iterating
+    /// Unicode scalar values; stops when `utf16_ix >= utf16_target` or the end of the text
+    /// is reached. After returning, `utf8_ix` is the byte index corresponding to the
+    /// current `utf16_ix`. If `utf16_target` is past the end, `utf8_ix` is set to `text.len()`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut conv = StringIndexConverter::new("a𐐷b"); // '𐐷' is a surrogate pair in UTF-16
+    /// conv.advance_to_utf16_ix(2);
+    /// assert!(conv.utf16_ix >= 2);
+    /// // utf8_ix is at a byte boundary corresponding to that UTF-16 index
+    /// ```
     fn advance_to_utf16_ix(&mut self, utf16_target: usize) {
         for (ix, c) in self.text[self.utf8_ix..].char_indices() {
             if self.utf16_ix >= utf16_target {
@@ -573,6 +882,14 @@ impl<'a> StringIndexConverter<'a> {
 }
 
 impl From<Metrics> for FontMetrics {
+    /// Convert a `Metrics` value from font-kit into the crate's `FontMetrics`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let metrics: Metrics = /* obtained from font-kit */ ;
+    /// let fm: FontMetrics = metrics.into();
+    /// ```
     fn from(metrics: Metrics) -> Self {
         FontMetrics {
             units_per_em: metrics.units_per_em,
@@ -589,6 +906,18 @@ impl From<Metrics> for FontMetrics {
 }
 
 impl From<RectF> for Bounds<f32> {
+    /// Converts a floating-point rectangle into `Bounds<f32>` by using the rectangle's origin and size.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let rect = RectF::new(1.0, 2.0, 3.0, 4.0);
+    /// let b: Bounds<f32> = rect.into();
+    /// assert_eq!(b.origin.x, 1.0);
+    /// assert_eq!(b.origin.y, 2.0);
+    /// assert_eq!(b.size.width, 3.0);
+    /// assert_eq!(b.size.height, 4.0);
+    /// ```
     fn from(rect: RectF) -> Self {
         Bounds {
             origin: point(rect.origin_x(), rect.origin_y()),
@@ -598,6 +927,18 @@ impl From<RectF> for Bounds<f32> {
 }
 
 impl From<RectI> for Bounds<DevicePixels> {
+    /// Converts a RectI into Bounds in device-pixel coordinates.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let rect = RectI::new(1, 2, 3, 4);
+    /// let bounds: Bounds<DevicePixels> = rect.into();
+    /// assert_eq!(bounds.origin.x, DevicePixels(1));
+    /// assert_eq!(bounds.origin.y, DevicePixels(2));
+    /// assert_eq!(bounds.size.width, DevicePixels(3));
+    /// assert_eq!(bounds.size.height, DevicePixels(4));
+    /// ```
     fn from(rect: RectI) -> Self {
         Bounds {
             origin: point(DevicePixels(rect.origin_x()), DevicePixels(rect.origin_y())),
@@ -607,12 +948,33 @@ impl From<RectI> for Bounds<DevicePixels> {
 }
 
 impl From<Vector2I> for Size<DevicePixels> {
+    /// Create a size from the integer vector's x and y components.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let v = Vector2I::new(3, 4);
+    /// let s = Size::from(v);
+    /// assert_eq!(s, size(3, 4));
+    /// ```
     fn from(value: Vector2I) -> Self {
         size(value.x().into(), value.y().into())
     }
 }
 
 impl From<RectI> for Bounds<i32> {
+    /// Creates a `Bounds<i32>` from a `RectI` by converting the rectangle's origin and size into `Bounds` components.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let rect = RectI::new(1, 2, 30, 40);
+    /// let bounds: Bounds<i32> = rect.into();
+    /// assert_eq!(bounds.origin.x, 1);
+    /// assert_eq!(bounds.origin.y, 2);
+    /// assert_eq!(bounds.size.width, 30);
+    /// assert_eq!(bounds.size.height, 40);
+    /// ```
     fn from(rect: RectI) -> Self {
         Bounds {
             origin: point(rect.origin_x(), rect.origin_y()),
@@ -622,24 +984,62 @@ impl From<RectI> for Bounds<i32> {
 }
 
 impl From<Point<u32>> for Vector2I {
+    /// Converts a point with unsigned coordinates into a 2D integer vector.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let p = Point { x: 3u32, y: 5u32 };
+    /// let v: Vector2I = p.into();
+    /// assert_eq!(v.x, 3);
+    /// assert_eq!(v.y, 5);
+    /// ```
     fn from(size: Point<u32>) -> Self {
         Vector2I::new(size.x as i32, size.y as i32)
     }
 }
 
 impl From<Vector2F> for Size<f32> {
+    /// Create a Size from a 2D float vector.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let v = Vector2F::new(3.0, 4.5);
+    /// let s = Size::from(v);
+    /// let expected = size(3.0, 4.5);
+    /// assert_eq!(s, expected);
+    /// ```
     fn from(vec: Vector2F) -> Self {
         size(vec.x(), vec.y())
     }
 }
 
 impl From<FontWeight> for FontkitWeight {
+    /// Converts a `FontWeight` into a `FontkitWeight`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let fw = FontWeight(400);
+    /// let kw: FontkitWeight = fw.into();
+    /// assert_eq!(kw, FontkitWeight(400));
+    /// ```
     fn from(value: FontWeight) -> Self {
         FontkitWeight(value.0)
     }
 }
 
 impl From<FontStyle> for FontkitStyle {
+    /// Converts a `FontStyle` into the corresponding `FontkitStyle`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let s = FontStyle::Italic;
+    /// let ks: FontkitStyle = s.into();
+    /// assert_eq!(ks, FontkitStyle::Italic);
+    /// ```
     fn from(style: FontStyle) -> Self {
         match style {
             FontStyle::Normal => FontkitStyle::Normal,
@@ -660,10 +1060,28 @@ mod lenient_font_attributes {
         CTFontDescriptor, CTFontDescriptorCopyAttribute, kCTFontFamilyNameAttribute,
     };
 
+    /// Safely retrieves the family name from a Core Text font descriptor.
+    ///
+    /// Attempts to read the `kCTFontFamilyNameAttribute` from `descriptor` and returns it as an owned
+    /// Rust `String` if present.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use core_text::font_descriptor::CTFontDescriptor;
+    /// use crate::lenient_font_attributes::family_name;
+    ///
+    /// let desc = CTFontDescriptor::from_name("Helvetica");
+    /// let name = family_name(&desc);
+    /// assert_eq!(name.as_deref(), Some("Helvetica"));
+    /// ```
     pub fn family_name(descriptor: &CTFontDescriptor) -> Option<String> {
         unsafe { get_string_attribute(descriptor, kCTFontFamilyNameAttribute) }
     }
 
+    /// Safely retrieves a string-valued attribute from a font descriptor.
+    ///
+    /// Returns `None` when the attribute is absent; otherwise converts the attribute's `CFString` value to a Rust `String`. Panics if the attribute exists but is not a `CFString`.
     fn get_string_attribute(
         descriptor: &CTFontDescriptor,
         attribute: CFStringRef,
@@ -681,6 +1099,37 @@ mod lenient_font_attributes {
         }
     }
 
+    /// Create an owned `CFString` from an existing `CFStringRef` by retaining the reference.
+    
+    ///
+    
+    /// # Safety
+    
+    ///
+    
+    /// The caller must provide a valid, non-null `CFStringRef`. The returned `CFString` takes ownership
+    
+    /// of an additional retain on the supplied reference; the caller must ensure the original reference
+    
+    /// remains valid for this operation.
+    
+    ///
+    
+    /// # Examples
+    
+    ///
+    
+    /// ```
+    
+    /// // `existing` must be a valid CFStringRef obtained from Core Foundation APIs.
+    
+    /// let existing: CFStringRef = /* existing non-null CFStringRef */ std::ptr::null_mut();
+    
+    /// let owned: CFString = unsafe { wrap_under_get_rule(existing) };
+    
+    /// assert!(!owned.as_concrete_TypeRef().is_null());
+    
+    /// ```
     unsafe fn wrap_under_get_rule(reference: CFStringRef) -> CFString {
         unsafe {
             assert!(!reference.is_null(), "Attempted to create a NULL object.");

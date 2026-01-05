@@ -36,6 +36,34 @@ use core_text::{
 use font_kit::font::Font as FontKitFont;
 use std::ptr;
 
+/// Apply OpenType feature settings and an optional fallback cascade to the given font, replacing the
+/// provided FontKitFont in place.
+///
+/// The function updates the font by creating a new font descriptor containing the requested OpenType
+/// features and, when `fallbacks` is `Some` and non-empty, a cascade list of fallback descriptors,
+/// then constructs a new CTFont from that descriptor and assigns it to `font`.
+///
+/// # Parameters
+///
+/// - `font`: the FontKitFont to update; the function replaces this value with the adjusted font.
+/// - `features`: OpenType feature settings to apply.
+/// - `fallbacks`: optional fallback configuration; if `None` or its list is empty, no cascade fallbacks
+///   are applied.
+///
+/// # Returns
+///
+/// `Ok(())` on success, `Err(_)` with context if an error occurs.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Prepare font, features, and optional fallbacks...
+/// let mut font: FontKitFont = /* obtain font */ unimplemented!();
+/// let features: FontFeatures = /* build features */ unimplemented!();
+/// let fallbacks: Option<FontFallbacks> = None;
+///
+/// apply_features_and_fallbacks(&mut font, &features, fallbacks)?;
+/// ```
 pub fn apply_features_and_fallbacks(
     font: &mut FontKitFont,
     features: &FontFeatures,
@@ -77,6 +105,21 @@ pub fn apply_features_and_fallbacks(
     }
 }
 
+/// Build a Core Foundation array of OpenType feature dictionaries from the provided features.
+///
+/// Each element is a CFDictionary with `kCTFontOpenTypeFeatureTag` (feature tag string)
+/// and `kCTFontOpenTypeFeatureValue` (feature value number).
+///
+/// # Examples
+///
+/// ```
+/// // Construct features (API shown illustratively; actual constructor may differ).
+/// let mut features = FontFeatures::new();
+/// features.add("liga", 1); // enable standard ligatures
+/// let array = generate_feature_array(&features);
+/// assert!(!array.is_null());
+/// ```
+—
 fn generate_feature_array(features: &FontFeatures) -> CFMutableArrayRef {
     unsafe {
         let feature_array = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
@@ -102,6 +145,26 @@ fn generate_feature_array(features: &FontFeatures) -> CFMutableArrayRef {
     }
 }
 
+/// Builds a mutable Core Foundation array of CTFontDescriptor fallbacks from the provided
+/// user fallback list and the system default cascade list for the given font.
+///
+/// This function appends a CTFontDescriptor for each user-supplied fallback name and then
+/// augments the array with system-provided cascade descriptors derived from `font_ref`.
+///
+/// # Parameters
+/// - `fallbacks`: user-provided font fallback collection whose names will be converted to descriptors.
+/// - `font_ref`: a `CTFontRef` used to query the system default cascade list for additional descriptors.
+///
+/// # Returns
+/// A `CFMutableArrayRef` containing `CTFontDescriptor` references suitable for use as a cascade/fallback list.
+///
+/// # Examples
+///
+/// ```no_run
+/// // `fallbacks` and `font_ref` are assumed to be available in the surrounding scope.
+/// let fallback_array = unsafe { generate_fallback_array(&fallbacks, font_ref) };
+/// assert!(!fallback_array.is_null());
+/// ```
 fn generate_fallback_array(fallbacks: &FontFallbacks, font_ref: CTFontRef) -> CFMutableArrayRef {
     unsafe {
         let fallback_array = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
@@ -117,6 +180,21 @@ fn generate_fallback_array(fallbacks: &FontFallbacks, font_ref: CTFontRef) -> CF
     }
 }
 
+/// Appends the system default font cascade descriptors for the given font to `fallback_array`.
+///
+/// This queries the user's preferred languages and obtains Core Text's default cascade list for
+/// `font_ref`, then appends each descriptor that contains a valid font path to `fallback_array`.
+///
+/// # Examples
+///
+/// ```
+/// // Unsafe: Core Foundation / Core Text APIs require unsafe context in this crate.
+/// unsafe {
+///     // `fallback_array` is a `CFMutableArrayRef` previously created (e.g., empty mutable array).
+///     // `font` is a `CTFont` obtained elsewhere.
+///     append_system_fallbacks(fallback_array, font.as_concrete_TypeRef());
+/// }
+/// ```
 fn append_system_fallbacks(fallback_array: CFMutableArrayRef, font_ref: CTFontRef) {
     unsafe {
         let preferred_languages: CFArray<CFString> =

@@ -98,16 +98,58 @@ pub fn background_executor() -> BackgroundExecutor {
     current_platform(true).background_executor()
 }
 
+/// Create a macOS Platform instance configured for headless or regular operation.
+///
+/// # Returns
+///
+/// An `Rc<dyn Platform>` configured for macOS.
+///
+/// # Examples
+///
+/// ```
+/// use std::rc::Rc;
+/// // Obtain a headless macOS platform
+/// let platform: Rc<dyn gpui::Platform> = gpui::platform::current_platform(true);
+/// ```
 #[cfg(target_os = "macos")]
 pub(crate) fn current_platform(headless: bool) -> Rc<dyn Platform> {
     Rc::new(MacPlatform::new(headless))
 }
 
+/// Constructs the platform implementation for iOS.
+///
+/// Returns an `Rc<dyn Platform>` configured for the iOS target.
+///
+/// # Examples
+///
+/// ```
+/// let platform = current_platform(false);
+/// assert!(std::rc::Rc::strong_count(&platform) >= 1);
+/// ```
 #[cfg(target_os = "ios")]
 pub(crate) fn current_platform(_headless: bool) -> Rc<dyn Platform> {
     Rc::new(IosPlatform::new())
 }
 
+/// Selects and constructs the appropriate platform backend for Linux and FreeBSD.
+///
+/// If `headless` is `true`, returns a headless platform. Otherwise selects a Wayland,
+/// X11, or headless backend based on environment detection and enabled features.
+///
+/// # Parameters
+///
+/// - `headless`: When `true`, force a headless platform implementation.
+///
+/// # Returns
+///
+/// An `Rc<dyn Platform>` containing the chosen platform implementation.
+///
+/// # Examples
+///
+/// ```
+/// let platform = current_platform(true);
+/// // Use `platform` as an `Rc<dyn Platform>` for platform-specific operations.
+/// ```
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(crate) fn current_platform(headless: bool) -> Rc<dyn Platform> {
     #[cfg(feature = "x11")]
