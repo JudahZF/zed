@@ -287,7 +287,7 @@ impl MacTextSystemState {
             } {
                 log::error!(
                     "Failed to read traits for font {:?}",
-                    font.postscript_name().unwrap()
+                    font.postscript_name().unwrap_or_else(|| "<unknown>".to_string())
                 );
                 continue;
             }

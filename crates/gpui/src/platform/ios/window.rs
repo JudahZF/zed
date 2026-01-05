@@ -339,7 +339,25 @@ extern "C" fn safe_area_insets_did_change(this: &Object, _sel: Sel) {
     unsafe {
         // Call super
         let superclass = class!(UIViewController);
-        let _: () = msg_send![super(this, superclass), viewSafeAreaInsetsDidChange];
+        // Notify about safe area changes by treating them as a layout/resize event.
+        let state_ptr: *mut c_void = *this.get_ivar(WINDOW_STATE_IVAR);
+        if !state_ptr.is_null() {
+            let state = &*(state_ptr as *const WindowState);
+
+            if let Some(callback) = state.resize_callback.lock().as_mut() {
+                // Obtain the current view size in points and convert to pixels.
+                let view: *mut Object = msg_send![this, view];
+                if !view.is_null() {
+                    let bounds: CGRect = msg_send![view, bounds];
+                    let size = bounds.size;
+                    let scale = state.scale_factor.lock().clone();
+                    callback(
+                        size(px(size.width as f32), px(size.height as f32)),
+                        scale,
+                    );
+                }
+            }
+        }
 
         // Could notify about safe area changes here
     }
@@ -362,7 +380,7 @@ extern "C" fn trait_collection_did_change(this: &Object, _sel: Sel, previous: *m
 }
 
 unsafe fn get_window_state(view: &Object) -> *const WindowState {
-    // SAFETY: The view was created with WINDOW_STATE_IVAR set to a valid WindowState pointer
+    let state_ptr: *mut c_void = *view.get_ivar(WINDOW_STATE_IVAR);
     // or null. Callers check for null before dereferencing.
     let state_ptr: *mut c_void = unsafe { *view.get_ivar(WINDOW_STATE_IVAR) };
     state_ptr as *const WindowState

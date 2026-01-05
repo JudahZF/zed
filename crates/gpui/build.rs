@@ -22,7 +22,10 @@ fn main() {
             macos::build();
         }
         Ok("ios") => {
-            // iOS uses the same Metal shaders as macOS
+            // iOS uses the same Metal shaders as macOS, but this build script
+            // runs on the host. We only compile and run ios::build() when the
+            // host is macOS, so this arm is specifically for cross-compiling
+            // from macOS to an iOS target.
             #[cfg(target_os = "macos")]
             ios::build();
         }

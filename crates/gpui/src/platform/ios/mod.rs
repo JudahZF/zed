@@ -69,17 +69,15 @@ impl BoolExt for bool {
 unsafe fn ns_string(string: &str) -> *mut objc::runtime::Object {
     use objc::class;
     unsafe {
-        let ns_string: *mut objc::runtime::Object = msg_send![class!(NSString), alloc];
-        let ns_string: *mut objc::runtime::Object = msg_send![
-            ns_string,
-            initWithBytes: string.as_ptr() as *const c_void
-            length: string.len()
-            encoding: 4u64 // NSUTF8StringEncoding
-        ];
-        let _: *mut objc::runtime::Object = msg_send![ns_string, autorelease];
-        ns_string
-    }
-}
+    let ns_string: *mut objc::runtime::Object = msg_send![class!(NSString), alloc];
+    let ns_string: *mut objc::runtime::Object = msg_send![
+        ns_string,
+        initWithBytes: string.as_ptr() as *const c_void
+        length: string.len()
+        encoding: 4u64 // NSUTF8StringEncoding
+    ];
+    let _: *mut objc::runtime::Object = msg_send![ns_string, autorelease];
+    ns_string
 
 /// CGSize to Size<Pixels> conversion
 #[repr(C)]
