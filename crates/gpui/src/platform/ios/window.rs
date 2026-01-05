@@ -366,6 +366,8 @@ extern "C" fn safe_area_insets_did_change(this: &Object, _sel: Sel) {
     unsafe {
         // Call super
         let superclass = class!(UIViewController);
+        let _: () = msg_send![super(this, superclass), viewSafeAreaInsetsDidChange];
+
         // Notify about safe area changes by treating them as a layout/resize event.
         let state_ptr: *mut c_void = *this.get_ivar(WINDOW_STATE_IVAR);
         if !state_ptr.is_null() {
