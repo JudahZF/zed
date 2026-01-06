@@ -24,6 +24,7 @@ use prost::Message as ProstMessage;
 use release_channel::{AppVersion, ReleaseChannel};
 use rpc::proto::Envelope;
 use russh::{client, ChannelMsg};
+use russh::keys::known_hosts::learn_known_hosts_path;
 use semver::Version;
 use std::{
     path::{Path, PathBuf},
@@ -118,7 +119,7 @@ impl client::Handler for RusshHandler {
                     "No known_hosts file found; learning host key for {}:{}",
                     host, port
                 );
-                if let Err(e) = russh::keys::learn_known_hosts_path(&host, port, &pubkey, &known_hosts_path) {
+                if let Err(e) = learn_known_hosts_path(&host, port, &pubkey, &known_hosts_path) {
                     log::warn!("Failed to save host key to known_hosts: {}", e);
                     // Still accept the connection even if we couldn't save
                 }
@@ -138,7 +139,7 @@ impl client::Handler for RusshHandler {
                         "Host {}:{} not in known_hosts; learning key (Trust On First Use)",
                         host, port
                     );
-                    if let Err(e) = russh::keys::learn_known_hosts_path(&host, port, &pubkey, &known_hosts_path) {
+                    if let Err(e) = learn_known_hosts_path(&host, port, &pubkey, &known_hosts_path) {
                         log::warn!("Failed to save host key to known_hosts: {}", e);
                         // Still accept the connection even if we couldn't save
                     }
