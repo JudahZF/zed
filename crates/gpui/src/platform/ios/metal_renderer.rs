@@ -797,6 +797,13 @@ impl MetalRenderer {
             Some(intermediate_texture),
         );
 
+        // When copying paths from the intermediate texture to the drawable,
+        // each pixel must only be copied once, in case of transparent paths.
+        //
+        // If all paths have the same draw order, then their bounds are all
+        // disjoint, so we can copy each path's bounds individually. If this
+        // batch combines different draw orders, we perform a single copy
+        // for a minimal spanning rect.
         let sprites;
         if paths.last().unwrap().order == first_path.order {
             sprites = paths

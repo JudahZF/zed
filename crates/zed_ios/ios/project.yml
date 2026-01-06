@@ -69,8 +69,17 @@ targets:
           set -e
           cd "${PROJECT_DIR}/../../.."
           
-          # Add cargo to PATH
+          # Add common cargo locations to PATH
           export PATH="$HOME/.cargo/bin:$PATH"
+          
+          # Verify cargo is available
+          if ! command -v cargo &> /dev/null; then
+            echo "error: cargo not found in PATH"
+            echo "Please install Rust via https://rustup.rs or ensure cargo is in your PATH."
+            echo "If cargo is installed in a custom location, add it to your PATH before building."
+            echo "Searched PATH: $PATH"
+            exit 1
+          fi
           
           # Determine the Rust target based on SDK
           if [ "$PLATFORM_NAME" = "iphonesimulator" ]; then

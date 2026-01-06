@@ -591,9 +591,10 @@ impl IosWindow {
             (*view_controller).set_ivar(WINDOW_STATE_IVAR, vc_weak_ptr);
             
             // Create display link target object. The alloc+init gives us ownership with
-            // retain count 1. CADisplayLink doesn't retain its target, so we store the raw
-            // pointer in IosWindow to keep it alive. We release it in Drop to balance the
-            // alloc+init.
+            // retain count 1. CADisplayLink's displayLinkWithTarget:selector: creates a
+            // strong reference to its target (retain count becomes 2). In Drop, we must
+            // first call invalidate on the display link (which releases its strong reference),
+            // then call release on display_link_target to balance alloc+init.
             let display_link_target_class = *DISPLAY_LINK_TARGET_CLASS.get().unwrap();
             let display_link_target: *mut Object = msg_send![display_link_target_class, alloc];
             let display_link_target: *mut Object = msg_send![display_link_target, init];
@@ -942,7 +943,9 @@ impl PlatformWindow for IosWindow {
 impl Drop for IosWindow {
     fn drop(&mut self) {
         unsafe {
-            // Stop and invalidate the display link
+            // Invalidate the display link first. This removes it from the run loop and
+            // releases its strong reference to display_link_target. This must happen
+            // before we release display_link_target to avoid a dangling pointer.
             if let Some(display_link) = self.state.display_link.lock().take() {
                 let _: () = msg_send![display_link, invalidate];
             }
@@ -957,7 +960,8 @@ impl Drop for IosWindow {
             (*self.view_controller).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
             (*self.display_link_target).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
             
-            // Release the display link target we retained
+            // Release display_link_target to balance the alloc+init in new().
+            // The display link's strong reference was already released by invalidate above.
             let _: () = msg_send![self.display_link_target, release];
 
             // Call any close callback
