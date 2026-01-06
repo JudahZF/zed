@@ -239,8 +239,7 @@ fn handle_touches(view: &Object, touches: *mut Object, _phase: &str) {
 
 extern "C" fn presses_began(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Use minimal handler for debugging
-        handle_presses_minimal(this, presses, true);
+        handle_presses(this, presses, true);
     }));
     if let Err(e) = result {
         log::error!("Panic in presses_began: {:?}", e);
@@ -249,8 +248,7 @@ extern "C" fn presses_began(this: &Object, _sel: Sel, presses: *mut Object, _eve
 
 extern "C" fn presses_ended(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Use minimal handler for debugging
-        handle_presses_minimal(this, presses, false);
+        handle_presses(this, presses, false);
     }));
     if let Err(e) = result {
         log::error!("Panic in presses_ended: {:?}", e);
@@ -260,7 +258,7 @@ extern "C" fn presses_ended(this: &Object, _sel: Sel, presses: *mut Object, _eve
 extern "C" fn presses_changed(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
     // Changed is used for pressure-sensitive keys, treat as key down
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        handle_presses_minimal(this, presses, true);
+        handle_presses(this, presses, true);
     }));
     if let Err(e) = result {
         log::error!("Panic in presses_changed: {:?}", e);
@@ -274,7 +272,7 @@ extern "C" fn presses_cancelled(
     _event: *mut Object,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        handle_presses_minimal(this, presses, false);
+        handle_presses(this, presses, false);
     }));
     if let Err(e) = result {
         log::error!("Panic in presses_cancelled: {:?}", e);
@@ -349,64 +347,6 @@ fn handle_presses(view: &Object, presses: *mut Object, is_key_down: bool) {
                 dispatch_event(&state, event);
             } else {
                 ios_keyboard_log(&format!("No event generated for press {}", i + 1));
-            }
-        }
-    }
-}
-
-/// TEMPORARY: Minimal press handler for debugging - just logs and returns
-#[allow(dead_code)]
-fn handle_presses_minimal(view: &Object, presses: *mut Object, is_key_down: bool) {
-    unsafe {
-        if presses.is_null() {
-            ios_keyboard_log("MINIMAL: presses is null");
-            return;
-        }
-        
-        // Try to get window state
-        let state = match get_window_state(view) {
-            Some(s) => s,
-            None => {
-                ios_keyboard_log("MINIMAL: could not get window state");
-                return;
-            }
-        };
-        
-        let count: usize = msg_send![presses, count];
-        ios_keyboard_log(&format!("MINIMAL: received {} presses, key_down={}", count, is_key_down));
-        
-        if count == 0 {
-            return;
-        }
-        
-        let all_objects: *mut Object = msg_send![presses, allObjects];
-        if all_objects.is_null() {
-            ios_keyboard_log("MINIMAL: allObjects is null");
-            return;
-        }
-        
-        for i in 0..count {
-            let press: *mut Object = msg_send![all_objects, objectAtIndex: i];
-            if press.is_null() {
-                ios_keyboard_log(&format!("MINIMAL: press {} is null", i));
-                continue;
-            }
-            
-            let key: *mut Object = msg_send![press, key];
-            if key.is_null() {
-                ios_keyboard_log(&format!("MINIMAL: press {} has no key", i));
-                continue;
-            }
-            
-            let key_code: i64 = msg_send![key, keyCode];
-            ios_keyboard_log(&format!("MINIMAL: press {} key_code={} (0x{:x})", i, key_code, key_code));
-            
-            // Try translate_key_press
-            if let Some(event) = translate_key_press(press, is_key_down, false) {
-                ios_keyboard_log(&format!("MINIMAL: translated press {} successfully", i));
-                dispatch_event(&state, event);
-            } else {
-                ios_keyboard_log(&format!("MINIMAL: translate_key_press returned None for press {}", i));
             }
         }
     }
