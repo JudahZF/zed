@@ -7,7 +7,7 @@
 use super::metal_atlas::MetalAtlas;
 use super::{
     events::{
-        translate_key_press, translate_modifiers_changed, translate_pan_to_scroll,
+        ios_keyboard_log, translate_key_press, translate_modifiers_changed, translate_pan_to_scroll,
         translate_touch_to_mouse, UIKeyModifierFlags,
     },
     metal_renderer::MetalRenderer,
@@ -117,6 +117,23 @@ unsafe fn register_view_class() -> &'static Class {
         can_become_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
     );
 
+    // UIKeyInput protocol for software keyboard support
+    if let Some(protocol) = Protocol::get("UIKeyInput") {
+        decl.add_protocol(protocol);
+    }
+    decl.add_method(
+        sel!(insertText:),
+        insert_text as extern "C" fn(&Object, Sel, *mut Object),
+    );
+    decl.add_method(
+        sel!(deleteBackward),
+        delete_backward as extern "C" fn(&Object, Sel),
+    );
+    decl.add_method(
+        sel!(hasText),
+        has_text as extern "C" fn(&Object, Sel) -> BOOL,
+    );
+
     // Layout
     decl.add_method(
         sel!(layoutSubviews),
@@ -221,16 +238,33 @@ fn handle_touches(view: &Object, touches: *mut Object, _phase: &str) {
 }
 
 extern "C" fn presses_began(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
-    handle_presses(this, presses, true);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Use minimal handler for debugging
+        handle_presses_minimal(this, presses, true);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_began: {:?}", e);
+    }
 }
 
 extern "C" fn presses_ended(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
-    handle_presses(this, presses, false);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Use minimal handler for debugging
+        handle_presses_minimal(this, presses, false);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_ended: {:?}", e);
+    }
 }
 
 extern "C" fn presses_changed(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
     // Changed is used for pressure-sensitive keys, treat as key down
-    handle_presses(this, presses, true);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_presses_minimal(this, presses, true);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_changed: {:?}", e);
+    }
 }
 
 extern "C" fn presses_cancelled(
@@ -239,46 +273,243 @@ extern "C" fn presses_cancelled(
     presses: *mut Object,
     _event: *mut Object,
 ) {
-    handle_presses(this, presses, false);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_presses_minimal(this, presses, false);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_cancelled: {:?}", e);
+    }
 }
 
 fn handle_presses(view: &Object, presses: *mut Object, is_key_down: bool) {
     unsafe {
+        // Early null check for presses
+        if presses.is_null() {
+            ios_keyboard_log("handle_presses: presses is null, returning early");
+            return;
+        }
+
         let Some(state) = get_window_state(view) else {
+            ios_keyboard_log("handle_presses: could not get window state");
             return;
         };
 
         let count: usize = msg_send![presses, count];
+        ios_keyboard_log(&format!(
+            "handle_presses: count={}, is_key_down={}",
+            count, is_key_down
+        ));
+
+        if count == 0 {
+            return;
+        }
+
         let all_objects: *mut Object = msg_send![presses, allObjects];
+        if all_objects.is_null() {
+            ios_keyboard_log("handle_presses: allObjects is null");
+            return;
+        }
 
         for i in 0..count {
             let press: *mut Object = msg_send![all_objects, objectAtIndex: i];
+            if press.is_null() {
+                ios_keyboard_log(&format!("handle_presses: press {} is null, skipping", i));
+                continue;
+            }
+            ios_keyboard_log(&format!("Processing press {}/{}", i + 1, count));
 
-            // Check if this is a repeat
+            // Check if this is a repeat - key may be null for non-keyboard presses
             let key: *mut Object = msg_send![press, key];
             let is_repeat: bool = if !key.is_null() {
                 msg_send![press, isRepeating]
             } else {
+                ios_keyboard_log("handle_presses: key is null (not a keyboard press?)");
                 false
             };
 
-            // Update modifier state from hardware keyboard and dispatch ModifiersChangedEvent if changed
-            if !key.is_null() {
-                let modifier_flags: i64 = msg_send![key, modifierFlags];
-                let new_modifiers = UIKeyModifierFlags(modifier_flags).to_modifiers();
-                let old_modifiers = state.modifiers.lock().clone();
-                if new_modifiers != old_modifiers {
-                    *state.modifiers.lock() = new_modifiers;
-                    let modifiers_event = translate_modifiers_changed(modifier_flags);
-                    dispatch_event(&state, modifiers_event);
-                }
+            // Skip non-keyboard presses entirely
+            if key.is_null() {
+                ios_keyboard_log("handle_presses: skipping non-keyboard press");
+                continue;
             }
 
+            // Update modifier state from hardware keyboard and dispatch ModifiersChangedEvent if changed
+            let modifier_flags: i64 = msg_send![key, modifierFlags];
+            let new_modifiers = UIKeyModifierFlags(modifier_flags).to_modifiers();
+            let old_modifiers = state.modifiers.lock().clone();
+            if new_modifiers != old_modifiers {
+                *state.modifiers.lock() = new_modifiers;
+                let modifiers_event = translate_modifiers_changed(modifier_flags);
+                dispatch_event(&state, modifiers_event);
+            }
+
+            // Translate the key press - this should not panic now with all the null checks
             if let Some(event) = translate_key_press(press, is_key_down, is_repeat) {
+                ios_keyboard_log(&format!("Dispatching key event for press {}", i + 1));
                 dispatch_event(&state, event);
+            } else {
+                ios_keyboard_log(&format!("No event generated for press {}", i + 1));
             }
         }
     }
+}
+
+/// TEMPORARY: Minimal press handler for debugging - just logs and returns
+#[allow(dead_code)]
+fn handle_presses_minimal(view: &Object, presses: *mut Object, is_key_down: bool) {
+    unsafe {
+        if presses.is_null() {
+            ios_keyboard_log("MINIMAL: presses is null");
+            return;
+        }
+        
+        // Try to get window state
+        let state = match get_window_state(view) {
+            Some(s) => s,
+            None => {
+                ios_keyboard_log("MINIMAL: could not get window state");
+                return;
+            }
+        };
+        
+        let count: usize = msg_send![presses, count];
+        ios_keyboard_log(&format!("MINIMAL: received {} presses, key_down={}", count, is_key_down));
+        
+        if count == 0 {
+            return;
+        }
+        
+        let all_objects: *mut Object = msg_send![presses, allObjects];
+        if all_objects.is_null() {
+            ios_keyboard_log("MINIMAL: allObjects is null");
+            return;
+        }
+        
+        for i in 0..count {
+            let press: *mut Object = msg_send![all_objects, objectAtIndex: i];
+            if press.is_null() {
+                ios_keyboard_log(&format!("MINIMAL: press {} is null", i));
+                continue;
+            }
+            
+            let key: *mut Object = msg_send![press, key];
+            if key.is_null() {
+                ios_keyboard_log(&format!("MINIMAL: press {} has no key", i));
+                continue;
+            }
+            
+            let key_code: i64 = msg_send![key, keyCode];
+            ios_keyboard_log(&format!("MINIMAL: press {} key_code={} (0x{:x})", i, key_code, key_code));
+            
+            // Try translate_key_press
+            if let Some(event) = translate_key_press(press, is_key_down, false) {
+                ios_keyboard_log(&format!("MINIMAL: translated press {} successfully", i));
+                dispatch_event(&state, event);
+            } else {
+                ios_keyboard_log(&format!("MINIMAL: translate_key_press returned None for press {}", i));
+            }
+        }
+    }
+}
+
+extern "C" fn insert_text(this: &Object, _sel: Sel, text: *mut Object) {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        if text.is_null() {
+            return;
+        }
+
+        let c_str: *const i8 = msg_send![text, UTF8String];
+        if c_str.is_null() {
+            return;
+        }
+
+        let text_str = match std::ffi::CStr::from_ptr(c_str).to_str() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        if text_str.is_empty() {
+            return;
+        }
+
+        // First try to use the input handler if one is registered
+        let handled = with_input_handler(&state, |input_handler| {
+            input_handler.replace_text_in_range(None, text_str);
+        })
+        .is_some();
+
+        // If no input handler, dispatch as a KeyDown event with key_char
+        // so that elements using on_key_down can receive it
+        if !handled {
+            let keystroke = crate::Keystroke {
+                key: text_str.into(),
+                modifiers: Modifiers::default(),
+                key_char: Some(text_str.to_string()),
+            };
+
+            let event = PlatformInput::KeyDown(crate::KeyDownEvent {
+                keystroke,
+                is_held: false,
+                prefer_character_input: true,
+            });
+
+            dispatch_event(&state, event);
+        }
+    }
+}
+
+extern "C" fn delete_backward(this: &Object, _sel: Sel) {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        let keystroke = crate::Keystroke {
+            key: "backspace".into(),
+            modifiers: Modifiers::default(),
+            key_char: None,
+        };
+
+        let event = PlatformInput::KeyDown(crate::KeyDownEvent {
+            keystroke,
+            is_held: false,
+            prefer_character_input: false,
+        });
+
+        dispatch_event(&state, event);
+    }
+}
+
+extern "C" fn has_text(this: &Object, _sel: Sel) -> BOOL {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return NO;
+        };
+
+        let has = with_input_handler(&state, |input_handler| {
+            input_handler
+                .selected_text_range(false)
+                .map(|sel| sel.range.start > 0 || sel.range.end > 0)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+
+        if has { YES } else { NO }
+    }
+}
+
+fn with_input_handler<F, R>(state: &WindowState, f: F) -> Option<R>
+where
+    F: FnOnce(&mut crate::platform::PlatformInputHandler) -> R,
+{
+    let mut input_handler = state.input_handler.lock().take()?;
+    let result = f(&mut input_handler);
+    *state.input_handler.lock() = Some(input_handler);
+    Some(result)
 }
 
 extern "C" fn layout_subviews(this: &Object, _sel: Sel) {
@@ -423,7 +654,12 @@ unsafe fn get_window_state(obj: &Object) -> Option<Arc<WindowState>> {
 }
 fn dispatch_event(state: &WindowState, event: PlatformInput) {
     if let Some(callback) = state.input_callback.lock().as_mut() {
-        callback(event);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            callback(event);
+        }));
+        if let Err(e) = result {
+            log::error!("Panic in dispatch_event: {:?}", e);
+        }
     }
 }
 

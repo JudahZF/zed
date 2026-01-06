@@ -3,11 +3,18 @@
 //! This crate provides the iOS application entry point for Zed,
 //! a thin client that connects to remote development machines.
 
+mod connect_view;
+mod persistence;
+mod remote_delegate;
+mod root_view;
+mod text_input;
+mod tutorial_view;
 mod welcome_view;
+mod workspace_view;
 
 use anyhow::Result;
 use gpui::{App, AppContext as _, Application, WindowOptions};
-use welcome_view::WelcomeView;
+use root_view::RootView;
 
 /// Log to iOS - we'll write to a file in the app's temp directory for inspection
 fn ios_log(message: &str) {
@@ -36,6 +43,21 @@ impl ZedIosApp {
     /// This sets up the minimal required infrastructure and opens the main window.
     pub fn init(cx: &mut App) -> Result<()> {
         ios_log("ZedIosApp::init starting");
+        
+        // Initialize release channel (required by remote connection code)
+        // Use Nightly channel to download the latest remote server binaries
+        ios_log("Initializing release channel...");
+        release_channel::init_test(
+            semver::Version::new(0, 1, 0),
+            release_channel::ReleaseChannel::Nightly,
+            cx,
+        );
+        ios_log("Release channel initialized");
+        
+        // Initialize Tokio runtime for async networking (SSH, HTTP, etc.)
+        ios_log("Initializing Tokio runtime...");
+        gpui_tokio::init(cx);
+        ios_log("Tokio runtime initialized");
         
         // Load embedded assets (fonts, icons, etc.)
         ios_log("Loading fonts...");
@@ -70,7 +92,7 @@ impl ZedIosApp {
         theme::init(theme::LoadThemes::JustBase, cx);
         ios_log("Theme initialized");
 
-        // Open the main window with welcome view
+        // Open the main window with root view
         ios_log("Opening window...");
         cx.open_window(
             WindowOptions {
@@ -79,9 +101,9 @@ impl ZedIosApp {
                 show: true,
                 ..Default::default()
             },
-            |_, cx| {
-                ios_log("Creating WelcomeView...");
-                cx.new(|_cx| WelcomeView::new())
+            |window, cx| {
+                ios_log("Creating RootView...");
+                cx.new(|cx| RootView::new(window, cx))
             },
         )?;
         ios_log("Window opened successfully");

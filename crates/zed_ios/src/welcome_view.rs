@@ -2,6 +2,8 @@
 //!
 //! This is a placeholder that will be replaced with the connection UI in Phase 3.
 
+#![allow(dead_code)]
+
 use gpui::{
     div, px, rgb, rgba, prelude::*, Context, IntoElement, Render, SharedString, Window,
 };
