@@ -41,12 +41,11 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "2"
         SUPPORTS_MACCATALYST: NO
-        LIBRARY_SEARCH_PATHS:
-          - "$(inherited)"
-          - "$(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/debug"
-          - "$(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/release"
-          - "$(PROJECT_DIR)/../../../target/aarch64-apple-ios/debug"
-          - "$(PROJECT_DIR)/../../../target/aarch64-apple-ios/release"
+        LIBRARY_SEARCH_PATHS: "$(inherited)"
+        LIBRARY_SEARCH_PATHS[config=Debug][sdk=iphonesimulator*]: "$(inherited) $(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/debug"
+        LIBRARY_SEARCH_PATHS[config=Release][sdk=iphonesimulator*]: "$(inherited) $(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/release"
+        LIBRARY_SEARCH_PATHS[config=Debug][sdk=iphoneos*]: "$(inherited) $(PROJECT_DIR)/../../../target/aarch64-apple-ios/debug"
+        LIBRARY_SEARCH_PATHS[config=Release][sdk=iphoneos*]: "$(inherited) $(PROJECT_DIR)/../../../target/aarch64-apple-ios/release"
         OTHER_LDFLAGS:
           - "-lzed_ios"
           - "-lc++"
