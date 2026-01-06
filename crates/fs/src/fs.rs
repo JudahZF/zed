@@ -1090,6 +1090,9 @@ impl Fs for RealFs {
     ) {
         // iOS is a remote-first client - file watching is handled on the remote machine.
         // Return an empty stream and a no-op watcher.
+        eprintln!(
+            "Warning: file watching is not supported on iOS; returning an empty stream and a no-op watcher."
+        );
         let watcher = Arc::new(RealWatcher {});
         (Box::pin(futures::stream::empty()), watcher)
     }
