@@ -49,6 +49,10 @@ use super::IosDisplay;
 
 const WINDOW_STATE_IVAR: &str = "windowState";
 
+unsafe extern "C" {
+    static NSRunLoopCommonModes: *mut Object;
+}
+
 static VIEW_CLASS: OnceLock<&'static Class> = OnceLock::new();
 static VIEW_CONTROLLER_CLASS: OnceLock<&'static Class> = OnceLock::new();
 
@@ -162,7 +166,10 @@ unsafe fn register_view_controller_class() -> &'static Class {
 // Objective-C callback implementations
 
 extern "C" fn layer_class(_this: &Class, _sel: Sel) -> *const Class {
-    class!(CAMetalLayer)
+    // Return regular CALayer as the view's layer class. The Metal renderer's
+    // CAMetalLayer is added as a sublayer instead of making the view's root
+    // layer itself a CAMetalLayer.
+    class!(CALayer)
 }
 
 extern "C" fn can_become_first_responder(_this: &Object, _sel: Sel) -> BOOL {
@@ -263,12 +270,12 @@ fn handle_presses(view: &Object, presses: *mut Object, is_key_down: bool) {
                 if new_modifiers != old_modifiers {
                     *state.modifiers.lock() = new_modifiers;
                     let modifiers_event = translate_modifiers_changed(modifier_flags);
-                    dispatch_event(state, modifiers_event);
+                    dispatch_event(&state, modifiers_event);
                 }
             }
 
             if let Some(event) = translate_key_press(press, is_key_down, is_repeat) {
-                dispatch_event(state, event);
+                dispatch_event(&state, event);
             }
         }
     }
@@ -284,17 +291,25 @@ extern "C" fn layout_subviews(this: &Object, _sel: Sel) {
             return;
         };
 
-        // Update Metal layer size
+        // Update Metal layer size - we need to update the renderer's layer, not the view's layer
         let bounds: CGRect = msg_send![this, bounds];
         let scale: f64 = msg_send![this, contentScaleFactor];
 
-        let layer: *mut Object = msg_send![this, layer];
-        let drawable_size = CGSize {
-            width: bounds.size.width * scale,
-            height: bounds.size.height * scale,
-        };
-        let _: () = msg_send![layer, setDrawableSize: drawable_size];
-        let _: () = msg_send![layer, setContentsScale: scale];
+        // Update renderer's layer frame and drawable size
+        {
+            let renderer = state.renderer.lock();
+            let renderer_layer = renderer.layer_ptr();
+            let _: () = msg_send![renderer_layer, setFrame: bounds];
+            let _: () = msg_send![renderer_layer, setContentsScale: scale];
+            let drawable_size = CGSize {
+                width: bounds.size.width * scale,
+                height: bounds.size.height * scale,
+            };
+            let _: () = msg_send![renderer_layer, setDrawableSize: drawable_size];
+        }
+
+        // Update scale factor in state
+        *state.scale_factor.lock() = scale as f32;
 
         // Notify of resize
         if let Some(callback) = state.resize_callback.lock().as_mut() {
@@ -345,7 +360,7 @@ extern "C" fn view_will_transition(
         if !state_ptr.is_null() {
             let state = &*(state_ptr as *const WindowState);
             if let Some(callback) = state.resize_callback.lock().as_mut() {
-                let scale = state.scale_factor.lock().clone();
+                let scale = *state.scale_factor.lock();
                 callback(
                     size(px(new_size.width as f32), px(new_size.height as f32)),
                     scale,
@@ -372,8 +387,8 @@ extern "C" fn safe_area_insets_did_change(this: &Object, _sel: Sel) {
             if !view.is_null() {
                 let bounds: CGRect = msg_send![view, bounds];
                 let size = bounds.size;
-                let scale = state.scale_factor.lock().clone();
-                callback(size(px(size.width as f32), px(size.height as f32)), scale);
+                let scale = *state.scale_factor.lock();
+                callback(crate::size(px(size.width as f32), px(size.height as f32)), scale);
             }
         }
     }
@@ -429,6 +444,7 @@ struct WindowState {
     input_handler: Mutex<Option<PlatformInputHandler>>,
     modifiers: Mutex<Modifiers>,
     scale_factor: Mutex<f32>,
+    display_link: Mutex<Option<*mut Object>>,
 }
 
 /// iOS window implementation.
@@ -443,6 +459,46 @@ pub struct IosWindow {
     /// in callbacks will safely return None.
     view_weak: Box<Weak<WindowState>>,
     view_controller_weak: Box<Weak<WindowState>>,
+    /// Display link target that keeps the callback alive
+    display_link_target: *mut Object,
+    /// Weak reference for the display link target
+    display_link_target_weak: Box<Weak<WindowState>>,
+}
+
+// CADisplayLink callback target class
+static DISPLAY_LINK_TARGET_CLASS: OnceLock<&'static Class> = OnceLock::new();
+
+fn ensure_display_link_class_registered() {
+    DISPLAY_LINK_TARGET_CLASS.get_or_init(|| unsafe { register_display_link_target_class() });
+}
+
+unsafe fn register_display_link_target_class() -> &'static Class {
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("GPUIDisplayLinkTarget", superclass).unwrap();
+    
+    decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
+    
+    decl.add_method(
+        sel!(step:),
+        display_link_step as extern "C" fn(&Object, Sel, *mut Object),
+    );
+    
+    decl.register()
+}
+
+extern "C" fn display_link_step(this: &Object, _sel: Sel, _display_link: *mut Object) {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+        
+        if let Some(callback) = state.request_frame_callback.lock().as_mut() {
+            callback(RequestFrameOptions {
+                require_presentation: true,
+                force_render: false,
+            });
+        }
+    }
 }
 
 
@@ -453,6 +509,7 @@ impl IosWindow {
         renderer_context: Arc<Mutex<InstanceBufferPool>>,
     ) -> anyhow::Result<Self> {
         ensure_classes_registered();
+        ensure_display_link_class_registered();
 
         unsafe {
             // Get the main screen
@@ -477,14 +534,27 @@ impl IosWindow {
             // Create the renderer - this will render into the view's CAMetalLayer
             let renderer = MetalRenderer::new(renderer_context);
 
-            // Configure the view's existing Metal layer
-            let layer: *mut Object = msg_send![view, layer];
-            let _: () = msg_send![layer, setContentsScale: scale];
+            // Get the view's layer and add the renderer's Metal layer as a sublayer.
+            // The view's layer is now a regular CALayer (not CAMetalLayer) so
+            // we can add the renderer's CAMetalLayer as a sublayer for rendering.
+            let view_layer: *mut Object = msg_send![view, layer];
+            let renderer_layer = renderer.layer_ptr();
+            
+            // Make view layer transparent so we can see through to the Metal layer
+            let clear_color: *mut Object = msg_send![class!(UIColor), clearColor];
+            let _: () = msg_send![view, setBackgroundColor: clear_color];
+            let _: () = msg_send![view_layer, setBackgroundColor: std::ptr::null::<c_void>()];
+            
+            let _: () = msg_send![view_layer, addSublayer: renderer_layer];
+            
+            // Configure the renderer's layer to fill the view
+            let _: () = msg_send![renderer_layer, setFrame: screen_bounds];
+            let _: () = msg_send![renderer_layer, setContentsScale: scale];
             let drawable_size = CGSize {
                 width: screen_bounds.size.width * scale,
                 height: screen_bounds.size.height * scale,
             };
-            let _: () = msg_send![layer, setDrawableSize: drawable_size];
+            let _: () = msg_send![renderer_layer, setDrawableSize: drawable_size];
 
             // Create the window state
             let state = Arc::new(WindowState {
@@ -503,6 +573,7 @@ impl IosWindow {
                 input_handler: Mutex::new(None),
                 modifiers: Mutex::new(Modifiers::default()),
                 scale_factor: Mutex::new(scale as f32),
+                display_link: Mutex::new(None),
             });
 
             // Create weak references for each Objective-C object. By storing Weak<WindowState>
@@ -510,6 +581,7 @@ impl IosWindow {
             // None if the IosWindow has been dropped, preventing use-after-free.
             let view_weak = Box::new(Arc::downgrade(&state));
             let view_controller_weak = Box::new(Arc::downgrade(&state));
+            let display_link_target_weak = Box::new(Arc::downgrade(&state));
 
             // Store weak reference pointers in Objective-C objects
             let view_weak_ptr = view_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
@@ -517,6 +589,32 @@ impl IosWindow {
             let vc_weak_ptr =
                 view_controller_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
             (*view_controller).set_ivar(WINDOW_STATE_IVAR, vc_weak_ptr);
+            
+            // Create display link target object. The alloc+init gives us ownership with
+            // retain count 1. CADisplayLink's displayLinkWithTarget:selector: creates a
+            // strong reference to its target (retain count becomes 2). In Drop, we must
+            // first call invalidate on the display link (which releases its strong reference),
+            // then call release on display_link_target to balance alloc+init.
+            let display_link_target_class = *DISPLAY_LINK_TARGET_CLASS.get().unwrap();
+            let display_link_target: *mut Object = msg_send![display_link_target_class, alloc];
+            let display_link_target: *mut Object = msg_send![display_link_target, init];
+            let dl_weak_ptr = display_link_target_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
+            (*display_link_target).set_ivar(WINDOW_STATE_IVAR, dl_weak_ptr);
+            
+            // Create CADisplayLink
+            let display_link: *mut Object = msg_send![
+                class!(CADisplayLink),
+                displayLinkWithTarget: display_link_target
+                selector: sel!(step:)
+            ];
+            
+            // Add display link to main run loop
+            let run_loop: *mut Object = msg_send![class!(NSRunLoop), mainRunLoop];
+            let _: () = msg_send![display_link, addToRunLoop: run_loop forMode: NSRunLoopCommonModes];
+            
+            // Store display link in state so we can stop it later
+            *state.display_link.lock() = Some(display_link);
+            
             // Set up the view hierarchy
             let _: () = msg_send![view_controller, setView: view];
             let _: () = msg_send![ui_window, setRootViewController: view_controller];
@@ -526,6 +624,10 @@ impl IosWindow {
 
             // Make the window visible
             let _: () = msg_send![ui_window, makeKeyAndVisible];
+            
+            // Request initial display - this ensures the layer gets drawn
+            let _: () = msg_send![view, setNeedsDisplay];
+            let _: () = msg_send![renderer_layer, setNeedsDisplay];
 
             Ok(Self {
                 ui_window,
@@ -534,6 +636,8 @@ impl IosWindow {
                 state,
                 view_weak,
                 view_controller_weak,
+                display_link_target,
+                display_link_target_weak,
             })
         }
     }
@@ -696,7 +800,7 @@ impl PlatformWindow for IosWindow {
                 _ => UI_ALERT_ACTION_STYLE_DEFAULT,
             };
 
-            let label_cstring = std::ffi::CString::new(answer.label()).unwrap_or_default();
+            let label_cstring = std::ffi::CString::new(answer.label().as_ref()).unwrap_or_default();
 
             let done_tx_clone = done_tx.clone();
             let block = ConcreteBlock::new(move |_action: *mut Object| {
@@ -839,6 +943,13 @@ impl PlatformWindow for IosWindow {
 impl Drop for IosWindow {
     fn drop(&mut self) {
         unsafe {
+            // Invalidate the display link first. This removes it from the run loop and
+            // releases its strong reference to display_link_target. This must happen
+            // before we release display_link_target to avoid a dangling pointer.
+            if let Some(display_link) = self.state.display_link.lock().take() {
+                let _: () = msg_send![display_link, invalidate];
+            }
+            
             // Clear the weak reference pointers in Objective-C objects.
             // This prevents any further attempts to access the state from callbacks.
             // Note: The weak references themselves (view_weak, view_controller_weak)
@@ -847,6 +958,11 @@ impl Drop for IosWindow {
             // 2. Any callback that already upgraded the weak ref has a valid Arc
             (*self.view).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
             (*self.view_controller).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
+            (*self.display_link_target).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
+            
+            // Release display_link_target to balance the alloc+init in new().
+            // The display link's strong reference was already released by invalidate above.
+            let _: () = msg_send![self.display_link_target, release];
 
             // Call any close callback
             if let Some(callback) = self.state.close_callback.lock().take() {

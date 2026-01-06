@@ -32,13 +32,14 @@ pub type EditorconfigProperties = ec4rs::Properties;
 
 use crate::{
     ActiveSettingsProfileName, FontFamilyName, IconThemeName, LanguageSettingsContent,
-    LanguageToSettingsMap, LspSettings, LspSettingsMap, ThemeName, VsCodeSettings, WorktreeId,
-    fallible_options,
+    LanguageToSettingsMap, LspSettings, LspSettingsMap, ThemeName, WorktreeId, fallible_options,
     merge_from::MergeFrom,
     settings_content::{
         ExtensionsSettingsContent, ProjectSettingsContent, SettingsContent, UserSettingsContent,
     },
 };
+#[cfg(not(target_os = "ios"))]
+use crate::VsCodeSettings;
 
 use settings_json::{infer_json_indent_size, parse_json_with_comments, update_value_in_json_text};
 
@@ -514,6 +515,7 @@ impl SettingsStore {
         });
     }
 
+    #[cfg(not(target_os = "ios"))]
     pub fn import_vscode_settings(
         &self,
         fs: Arc<dyn Fs>,
@@ -722,6 +724,7 @@ impl SettingsStore {
         new_text
     }
 
+    #[cfg(not(target_os = "ios"))]
     pub fn get_vscode_edits(&self, old_text: String, vscode: &VsCodeSettings) -> String {
         self.new_text_for_update(old_text, |content| {
             content.merge_from(&vscode.settings_content())
@@ -1400,9 +1403,11 @@ mod tests {
     use std::num::NonZeroU32;
 
     use crate::{
-        ClosePosition, ItemSettingsContent, VsCodeSettingsSource, default_settings,
+        ClosePosition, ItemSettingsContent, default_settings,
         settings_content::LanguageSettingsContent, test_settings,
     };
+    #[cfg(not(target_os = "ios"))]
+    use crate::VsCodeSettingsSource;
 
     use super::*;
     use unindent::Unindent;
@@ -1785,6 +1790,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "ios"))]
     #[gpui::test]
     fn test_vscode_import(cx: &mut App) {
         let mut store = SettingsStore::new(cx, &test_settings());
@@ -1896,6 +1902,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "ios"))]
     #[track_caller]
     fn check_vscode_import(
         store: &mut SettingsStore,

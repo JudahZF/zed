@@ -7,6 +7,7 @@ mod serde_helper;
 mod settings_content;
 mod settings_file;
 mod settings_store;
+#[cfg(not(target_os = "ios"))]
 mod vscode_import;
 
 pub use settings_content::*;
@@ -38,6 +39,7 @@ pub use settings_store::{
     SettingsParseResult, SettingsStore,
 };
 
+#[cfg(not(target_os = "ios"))]
 pub use vscode_import::{VsCodeSettings, VsCodeSettingsSource};
 
 pub use keymap_file::ActionSequence;

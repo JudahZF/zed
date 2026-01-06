@@ -20843,6 +20843,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zed_ios"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assets",
+ "env_logger 0.11.8",
+ "gpui",
+ "log",
+ "settings",
+ "theme",
+ "ui",
+ "util",
+]
+
+[[package]]
 name = "zed_proto"
 version = "0.3.1"
 dependencies = [

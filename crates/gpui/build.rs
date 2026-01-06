@@ -541,7 +541,7 @@ mod ios {
             "ContentMask".into(),
             "Uniforms".into(),
             "AtlasTile".into(),
-            "PathInputIndex".into(),
+            "PathRasterizationInputIndex".into(),
             "PathVertex_ScaledPixels".into(),
             "PathRasterizationVertex".into(),
             "ShadowInputIndex".into(),
@@ -596,14 +596,22 @@ mod ios {
             PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.metallib");
         println!("cargo:rerun-if-changed={}", shader_path);
 
-        // Compile for iOS using iphoneos SDK
+        // Determine SDK based on target - simulator targets end with "-sim"
+        let target = env::var("TARGET").unwrap_or_default();
+        let (sdk, min_version_flag) = if target.contains("-sim") {
+            ("iphonesimulator", "-miphonesimulator-version-min=18.0")
+        } else {
+            ("iphoneos", "-mios-version-min=18.0")
+        };
+
+        // Compile for iOS using appropriate SDK
         let output = Command::new("xcrun")
             .args([
                 "-sdk",
-                "iphoneos",
+                sdk,
                 "metal",
                 "-gline-tables-only",
-                "-mios-version-min=26.0",
+                min_version_flag,
                 "-MO",
                 "-c",
                 shader_path,
@@ -624,7 +632,7 @@ mod ios {
         }
 
         let output = Command::new("xcrun")
-            .args(["-sdk", "iphoneos", "metallib"])
+            .args(["-sdk", sdk, "metallib"])
             .arg(air_output_path)
             .arg("-o")
             .arg(metallib_output_path)
