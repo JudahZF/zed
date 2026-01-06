@@ -1,3 +1,5 @@
+#![cfg(not(target_os = "ios"))]
+
 use crate::*;
 use anyhow::{Context as _, Result, anyhow};
 use collections::HashMap;

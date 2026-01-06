@@ -92,7 +92,7 @@ impl ZedIosApp {
 
 /// Entry point called from Objective-C app delegate.
 /// This function is marked #[no_mangle] so it can be called by name from main.m
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn zed_ios_init() {
     ios_log("zed_ios_init called");
     

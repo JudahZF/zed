@@ -8,7 +8,7 @@ license = "GPL-3.0-or-later"
 [lib]
 name = "zed_ios"
 path = "src/zed_ios.rs"
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "rlib"]
 
 [lints]
 workspace = true
