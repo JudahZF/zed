@@ -53,17 +53,16 @@ pub struct RusshRemoteConnection {
 /// Handler for russh client events
 struct RusshHandler;
 
-#[async_trait::async_trait]
 impl client::Handler for RusshHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(
+    fn check_server_key(
         &mut self,
-        _server_public_key: &ssh_key::PublicKey,
-    ) -> Result<bool, Self::Error> {
+        _server_public_key: &russh::keys::PublicKey,
+    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
         // For now, accept all server keys (similar to StrictHostKeyChecking=no)
         // TODO: Implement proper host key verification with a known_hosts file
-        Ok(true)
+        async { Ok(true) }
     }
 }
 
@@ -111,9 +110,12 @@ impl RusshRemoteConnection {
                     .authenticate_password(&username_for_connect, &password)
                     .await
                     .context("Password authentication failed")?
+                    .success()
             } else {
                 // Try none authentication
-                session.authenticate_none(&username_for_connect).await.unwrap_or(false)
+                session.authenticate_none(&username_for_connect).await
+                    .map(|r| r.success())
+                    .unwrap_or(false)
             };
 
             Ok::<_, anyhow::Error>((session, authenticated))
@@ -140,7 +142,8 @@ impl RusshRemoteConnection {
                 let result = session
                     .authenticate_password(&username_for_auth, &password)
                     .await
-                    .context("Password authentication failed")?;
+                    .context("Password authentication failed")?
+                    .success();
                 Ok::<_, anyhow::Error>((session, result))
             })?.await?;
             

@@ -620,10 +620,9 @@ rsa = "0.9.6"
 runtimelib = { version = "0.30.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"
 ] }
-russh = "0.49.2"
-russh-keys = "0.49.2"
-russh-sftp = "2.0.5"
-ring = "0.17"
+russh = "0.56.0"
+russh-sftp = "2.1.1"
+ring = "0.17.12"
 rust-embed = { version = "8.4", features = ["include-exclude"] }
 rustc-hash = "2.1.0"
 rustls = { version = "0.23.26", default-features = false, features = ["logging", "std", "tls12", "ring"] }
