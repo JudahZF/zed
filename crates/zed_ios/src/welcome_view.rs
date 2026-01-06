@@ -22,6 +22,11 @@ impl WelcomeView {
     }
 }
 
+impl Default for WelcomeView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl Render for WelcomeView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Use explicit colors that will definitely be visible

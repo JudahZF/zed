@@ -51,7 +51,7 @@ unsafe extern "C" {
 /// Get the main dispatch queue.
 /// On iOS/macOS, dispatch_get_main_queue() is a macro that accesses _dispatch_main_q.
 fn dispatch_get_main_queue() -> dispatch_queue_t {
-    unsafe { addr_of!(_dispatch_main_q) as *const _ as dispatch_queue_t }
+    unsafe { addr_of!(_dispatch_main_q) as dispatch_queue_t }
 }
 
 /// Payload for compat runnables that stores the source location captured at dispatch time.
