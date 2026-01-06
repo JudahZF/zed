@@ -301,7 +301,7 @@ impl RusshRemoteConnection {
         // Ensure the remote server binary is available
         let (release_channel, version) =
             cx.update(|cx| (ReleaseChannel::global(cx), AppVersion::global(cx)))?;
-        log::error!(
+        log::info!(
             "Ensuring server binary for release_channel={:?}, version={}",
             release_channel,
             version
@@ -309,7 +309,7 @@ impl RusshRemoteConnection {
         let remote_binary_path = this
             .ensure_server_binary(&delegate, release_channel, version, cx)
             .await?;
-        log::error!(
+        log::info!(
             "Remote binary path set to: {}",
             remote_binary_path.display(this.path_style())
         );
@@ -516,7 +516,7 @@ impl RusshRemoteConnection {
         let dst_path =
             paths::remote_server_dir_relative().join(RelPath::unix(&binary_name).unwrap());
 
-        log::error!(
+        log::debug!(
             "Checking for existing binary at: {}",
             dst_path.display(self.path_style())
         );
@@ -526,17 +526,17 @@ impl RusshRemoteConnection {
             let guard = self.session.lock().await;
             let session = guard.as_ref().ok_or_else(|| anyhow!("SSH session not available"))?;
             let check_cmd = format!("{} version", dst_path.display(self.path_style()));
-            log::error!("Running check command: {}", check_cmd);
+            log::debug!("Running check command: {}", check_cmd);
             match Self::run_command(session, &check_cmd).await {
                 Ok(output) if !output.trim().is_empty() => {
-                    log::error!("Binary exists, version output: {}", output.trim());
+                    log::debug!("Binary exists, version output: {}", output.trim());
                     return Ok(dst_path);
                 }
                 Ok(_) => {
-                    log::error!("Binary check returned empty output, treating as not found");
+                    log::debug!("Binary check returned empty output, treating as not found");
                 }
                 Err(e) => {
-                    log::error!("Binary does not exist or is not executable: {}", e);
+                    log::debug!("Binary does not exist or is not executable: {}", e);
                 }
             }
         }
@@ -561,14 +561,14 @@ impl RusshRemoteConnection {
             .unwrap(),
         );
 
-        log::error!(
+        log::debug!(
             "Will download to temp path: {}",
             tmp_path_gz.display(self.path_style())
         );
 
         // Try to download on the server first
         if !self.connection_options.upload_binary_over_ssh {
-            log::error!("Attempting to download binary directly on server...");
+            log::debug!("Attempting to download binary directly on server...");
             if let Some(url) = delegate
                 .get_download_url(
                     self.ssh_platform,
@@ -578,33 +578,33 @@ impl RusshRemoteConnection {
                 )
                 .await?
             {
-                log::error!("Got download URL: {}", url);
+                log::debug!("Got download URL: {}", url);
                 match self
                     .download_binary_on_server(&url, &tmp_path_gz, delegate, cx)
                     .await
                 {
                     Ok(_) => {
-                        log::error!("Download on server succeeded, extracting...");
+                        log::debug!("Download on server succeeded, extracting...");
                         self.extract_server_binary(&dst_path, &tmp_path_gz, delegate, cx)
                             .await
                             .context("extracting server binary")?;
                         return Ok(dst_path);
                     }
                     Err(e) => {
-                        log::error!(
+                        log::warn!(
                             "Failed to download binary on server, will try uploading: {e:#}"
                         );
                     }
                 }
             } else {
-                log::error!("No download URL returned from delegate");
+                log::debug!("No download URL returned from delegate");
             }
         } else {
-            log::error!("upload_binary_over_ssh is set, skipping server-side download");
+            log::debug!("upload_binary_over_ssh is set, skipping server-side download");
         }
 
         // Download locally and upload via SFTP
-        log::error!("Downloading binary locally and uploading via SFTP...");
+        log::debug!("Downloading binary locally and uploading via SFTP...");
         let src_path = delegate
             .download_server_binary_locally(
                 self.ssh_platform,
@@ -615,13 +615,13 @@ impl RusshRemoteConnection {
             .await
             .context("downloading server binary locally")?;
         
-        log::error!("Downloaded locally to: {:?}", src_path);
+        log::debug!("Downloaded locally to: {:?}", src_path);
         
         self.upload_local_server_binary(&src_path, &tmp_path_gz, delegate, cx)
             .await
             .context("uploading server binary")?;
         
-        log::error!("Uploaded to remote, extracting...");
+        log::debug!("Uploaded to remote, extracting...");
         self.extract_server_binary(&dst_path, &tmp_path_gz, delegate, cx)
             .await
             .context("extracting server binary")?;
@@ -956,7 +956,7 @@ impl RemoteConnection for RusshRemoteConnection {
                 command.push_str(" --reconnect");
             }
 
-            log::error!("Starting remote server proxy with command: {}", command);
+            log::info!("Starting remote server proxy with command: {}", command);
 
             // Open the channel while holding the lock, then release for RPC
             let channel = {
@@ -967,7 +967,7 @@ impl RemoteConnection for RusshRemoteConnection {
                 channel
             };
 
-            log::error!("SSH channel opened for proxy, starting RPC bridge");
+            log::info!("SSH channel opened for proxy, starting RPC bridge");
 
             // Bridge the SSH channel to the RPC protocol
             handle_rpc_over_ssh_channel(

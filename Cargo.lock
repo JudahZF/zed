@@ -21841,7 +21841,6 @@ dependencies = [
  "anyhow",
  "askpass",
  "assets",
- "env_logger 0.11.8",
  "futures 0.3.31",
  "gpui",
  "gpui_tokio",
@@ -21861,6 +21860,7 @@ dependencies = [
  "ui",
  "unicode-segmentation",
  "util",
+ "zlog",
 ]
 
 [[package]]
