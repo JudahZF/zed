@@ -14032,6 +14032,7 @@ dependencies = [
  "futures 0.3.31",
  "gpui",
  "gpui_tokio",
+ "home",
  "log",
  "parking_lot",
  "paths",

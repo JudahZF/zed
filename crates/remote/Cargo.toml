@@ -45,6 +45,7 @@ which.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
 gpui_tokio.workspace = true
+home = "0.5"
 russh.workspace = true
 russh-sftp.workspace = true
 tokio.workspace = true

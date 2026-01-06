@@ -50,19 +50,123 @@ pub struct RusshRemoteConnection {
     killed: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Handler for russh client events
-struct RusshHandler;
+/// Handler for russh client events.
+/// 
+/// This handler implements SSH host key verification using the user's known_hosts file.
+/// The verification follows these rules:
+/// 1. If the host key matches an entry in known_hosts, accept the connection
+/// 2. If the host key differs from a known entry (key changed), reject with error
+/// 3. If the host is not in known_hosts, accept and learn the key (TOFU - Trust On First Use)
+/// 
+/// On iOS, the known_hosts file is stored in the app's Documents directory since
+/// the traditional ~/.ssh/known_hosts is not accessible.
+struct RusshHandler {
+    /// The hostname being connected to (used for known_hosts lookup)
+    host: String,
+    /// The port being connected to (used for known_hosts lookup)  
+    port: u16,
+}
+
+impl RusshHandler {
+    fn new(host: String, port: u16) -> Self {
+        Self { host, port }
+    }
+    
+    /// Get the path to the known_hosts file.
+    /// On iOS, we use the app's home directory since ~/.ssh is not accessible.
+    fn known_hosts_path() -> Option<std::path::PathBuf> {
+        home::home_dir().map(|home| home.join(".ssh").join("known_hosts"))
+    }
+}
 
 impl client::Handler for RusshHandler {
     type Error = russh::Error;
 
+    /// Verify the server's host key against known_hosts.
+    /// 
+    /// This method implements Trust On First Use (TOFU) semantics:
+    /// - If the key matches known_hosts: Accept (return Ok(true))
+    /// - If the key differs from known_hosts: Reject with KeyChanged error
+    /// - If the host is unknown: Accept and save the key for future connections
+    /// 
+    /// This provides security against man-in-the-middle attacks for hosts that
+    /// have been connected to before, while allowing first-time connections
+    /// to proceed smoothly.
     fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKey,
+        server_public_key: &russh::keys::PublicKey,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        // For now, accept all server keys (similar to StrictHostKeyChecking=no)
-        // TODO: Implement proper host key verification with a known_hosts file
-        async { Ok(true) }
+        let host = self.host.clone();
+        let port = self.port;
+        let pubkey = server_public_key.clone();
+        
+        async move {
+            // Get the known_hosts file path
+            let Some(known_hosts_path) = Self::known_hosts_path() else {
+                // No home directory found - accept the key but log a warning
+                log::warn!(
+                    "Could not determine home directory for known_hosts; accepting key without verification"
+                );
+                return Ok(true);
+            };
+            
+            // Check if the known_hosts file exists
+            if !known_hosts_path.exists() {
+                // No known_hosts file yet - this is a first connection
+                // Learn the key for future connections (TOFU)
+                log::info!(
+                    "No known_hosts file found; learning host key for {}:{}",
+                    host, port
+                );
+                if let Err(e) = russh::keys::learn_known_hosts_path(&host, port, &pubkey, &known_hosts_path) {
+                    log::warn!("Failed to save host key to known_hosts: {}", e);
+                    // Still accept the connection even if we couldn't save
+                }
+                return Ok(true);
+            }
+            
+            // Check the server key against known_hosts
+            match russh::keys::check_known_hosts_path(&host, port, &pubkey, &known_hosts_path) {
+                Ok(true) => {
+                    // Key matches known_hosts - accept
+                    log::info!("Host key for {}:{} verified against known_hosts", host, port);
+                    Ok(true)
+                }
+                Ok(false) => {
+                    // Host not in known_hosts - learn the key (TOFU)
+                    log::info!(
+                        "Host {}:{} not in known_hosts; learning key (Trust On First Use)",
+                        host, port
+                    );
+                    if let Err(e) = russh::keys::learn_known_hosts_path(&host, port, &pubkey, &known_hosts_path) {
+                        log::warn!("Failed to save host key to known_hosts: {}", e);
+                        // Still accept the connection even if we couldn't save
+                    }
+                    Ok(true)
+                }
+                Err(russh::keys::Error::KeyChanged { line }) => {
+                    // SECURITY: The host key has changed! This could indicate a MITM attack.
+                    log::error!(
+                        "SECURITY WARNING: Host key for {}:{} has changed! \
+                         Previous key was at line {} in known_hosts. \
+                         This could indicate a man-in-the-middle attack. \
+                         If you trust this new key, remove line {} from {:?} and reconnect.",
+                        host, port, line, line, known_hosts_path
+                    );
+                    // Reject the connection - the user must manually resolve this
+                    Err(russh::Error::Keys(russh::keys::Error::KeyChanged { line }))
+                }
+                Err(e) => {
+                    // Other error (e.g., parse error in known_hosts)
+                    log::warn!(
+                        "Error checking known_hosts for {}:{}: {}; accepting key",
+                        host, port, e
+                    );
+                    // Accept the connection despite the error to avoid blocking legitimate use
+                    Ok(true)
+                }
+            }
+        }
     }
 }
 
@@ -91,6 +195,8 @@ impl RusshRemoteConnection {
         let initial_password = connection_options.password.clone();
         let addr_for_connect = addr.clone();
         let username_for_connect = username.clone();
+        let host_for_handler = host.clone();
+        let port_for_handler = port;
         
         let (mut session, mut authenticated) = Tokio::spawn_result(cx, async move {
             let config = client::Config {
@@ -98,7 +204,7 @@ impl RusshRemoteConnection {
                 ..Default::default()
             };
             let config = Arc::new(config);
-            let handler = RusshHandler;
+            let handler = RusshHandler::new(host_for_handler, port_for_handler);
             
             let mut session = client::connect(config, &addr_for_connect, handler)
                 .await
