@@ -276,12 +276,17 @@ impl ConnectView {
     fn submit_password(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tx) = self.password_tx.take() {
             let password_text = self.password_input.read(cx).text().to_string();
-            if let Ok(encrypted) = EncryptedPassword::try_from(password_text.as_str()) {
-                tx.send(encrypted).ok();
-                self.state = ConnectionState::Connecting;
-                self.status_message = Some("Authenticating...".to_string());
-            } else {
-                self.state = ConnectionState::Error("Failed to process password".to_string());
+            match EncryptedPassword::try_from(password_text.as_str()) {
+                Ok(encrypted) => {
+                    tx.send(encrypted).ok();
+                    self.state = ConnectionState::Connecting;
+                    self.status_message = Some("Authenticating...".to_string());
+                }
+                Err(e) => {
+                    log::error!("Failed to encrypt password: {:?}", e);
+                    self.state = ConnectionState::Error("Failed to process password".to_string());
+                    // Connection task may be waiting; it will fail when tx is dropped
+                }
             }
             cx.notify();
         }

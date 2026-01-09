@@ -1008,7 +1008,13 @@ async fn upload_directory_recursive(
             file.shutdown().await?;
         }
     }
-
+    let final_exit_code = match exit_code {
+        Some(code) => code as i32,
+        None => {
+            log::warn!("No exit status received from remote process");
+            -1 // Or return an error
+        }
+    };
     Ok(())
 }
 
