@@ -47,7 +47,6 @@ Once connected, you'll see your remote filesystem and can start editing code!
 
 - The Zed remote server might not be running
 - Start it with `zed --remote-server` on your development machine
-- Check that no other application is using port 4545
 
 ## Tips for Best Experience
 

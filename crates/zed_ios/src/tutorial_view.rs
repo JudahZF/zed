@@ -85,7 +85,11 @@ impl TutorialView {
             .justify_center()
             .children(TUTORIAL_STEPS.iter().enumerate().map(|(idx, _)| {
                 let is_current = idx == self.current_step;
-                let color = if is_current { accent_color } else { muted_color };
+                let color = if is_current {
+                    accent_color
+                } else {
+                    muted_color
+                };
 
                 div()
                     .id(format!("step-{}", idx))
@@ -108,23 +112,46 @@ impl TutorialView {
         let accent_color = rgb(0x89b4fa);
 
         let mut elements: Vec<gpui::AnyElement> = Vec::new();
+        let mut in_code_block = false;
 
         for line in step.content.lines() {
-            let line = line.trim();
+            let trimmed = line.trim();
 
-            if line.is_empty() {
+            if trimmed.starts_with("```") {
+                in_code_block = !in_code_block;
+                continue;
+            }
+
+            if in_code_block {
+                elements.push(
+                    div()
+                        .px(px(12.0))
+                        .py(px(4.0))
+                        .bg(code_bg)
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .text_color(muted_color)
+                                .child(line.to_string()),
+                        )
+                        .into_any_element(),
+                );
+                continue;
+            }
+
+            if trimmed.is_empty() {
                 elements.push(div().h(px(12.0)).into_any_element());
-            } else if line.starts_with("# ") {
+            } else if trimmed.starts_with("# ") {
                 elements.push(
                     div()
                         .text_size(px(28.0))
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(text_color)
                         .mb(px(16.0))
-                        .child(line.trim_start_matches("# "))
+                        .child(trimmed.trim_start_matches("# "))
                         .into_any_element(),
                 );
-            } else if line.starts_with("## ") {
+            } else if trimmed.starts_with("## ") {
                 elements.push(
                     div()
                         .text_size(px(22.0))
@@ -132,10 +159,10 @@ impl TutorialView {
                         .text_color(text_color)
                         .mt(px(20.0))
                         .mb(px(12.0))
-                        .child(line.trim_start_matches("## "))
+                        .child(trimmed.trim_start_matches("## "))
                         .into_any_element(),
                 );
-            } else if line.starts_with("### ") {
+            } else if trimmed.starts_with("### ") {
                 elements.push(
                     div()
                         .text_size(px(18.0))
@@ -143,12 +170,10 @@ impl TutorialView {
                         .text_color(text_color)
                         .mt(px(16.0))
                         .mb(px(8.0))
-                        .child(line.trim_start_matches("### "))
+                        .child(trimmed.trim_start_matches("### "))
                         .into_any_element(),
                 );
-            } else if line.starts_with("```") {
-                // Skip code fence markers
-            } else if line.starts_with("- ") || line.starts_with("* ") {
+            } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
                 elements.push(
                     div()
                         .flex()
@@ -165,45 +190,61 @@ impl TutorialView {
                                 .text_size(px(16.0))
                                 .text_color(text_color)
                                 .flex_1()
-                                .child(line[2..].to_string()),
+                                .child(trimmed[2..].to_string()),
                         )
                         .into_any_element(),
                 );
-            } else if line.starts_with("1. ") || line.starts_with("2. ") || line.starts_with("3. ") {
-                let (num, rest) = line.split_once(". ").unwrap_or(("", line));
-                elements.push(
-                    div()
-                        .flex()
-                        .gap(px(8.0))
-                        .mb(px(4.0))
-                        .child(
+            } else if trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
+                && trimmed.contains(". ")
+            {
+                if let Some((num, rest)) = trimmed.split_once(". ") {
+                    if num.chars().all(|c| c.is_ascii_digit()) {
+                        elements.push(
                             div()
-                                .text_size(px(16.0))
-                                .text_color(accent_color)
-                                .w(px(20.0))
-                                .child(format!("{}.", num)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(16.0))
-                                .text_color(text_color)
-                                .flex_1()
-                                .child(rest.to_string()),
-                        )
-                        .into_any_element(),
-                );
-            } else if line.contains('`') && !line.starts_with("```") {
-                // Line with inline code
+                                .flex()
+                                .gap(px(8.0))
+                                .mb(px(4.0))
+                                .child(
+                                    div()
+                                        .text_size(px(16.0))
+                                        .text_color(accent_color)
+                                        .w(px(20.0))
+                                        .child(format!("{}.", num)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(16.0))
+                                        .text_color(text_color)
+                                        .flex_1()
+                                        .child(rest.to_string()),
+                                )
+                                .into_any_element(),
+                        );
+                        continue;
+                    }
+                }
                 elements.push(
                     div()
                         .text_size(px(16.0))
                         .text_color(text_color)
                         .mb(px(8.0))
-                        .child(line.to_string())
+                        .line_height(px(24.0))
+                        .child(trimmed.to_string())
                         .into_any_element(),
                 );
-            } else if line.chars().all(|c| c.is_ascii() && !c.is_alphanumeric() && c != ' ') {
-                // Looks like a code line (commands, paths, etc.)
+            } else if trimmed.contains('`') {
+                elements.push(
+                    div()
+                        .text_size(px(16.0))
+                        .text_color(text_color)
+                        .mb(px(8.0))
+                        .child(trimmed.to_string())
+                        .into_any_element(),
+                );
+            } else if trimmed
+                .chars()
+                .all(|c| c.is_ascii() && !c.is_alphanumeric() && c != ' ')
+            {
                 elements.push(
                     div()
                         .px(px(12.0))
@@ -215,19 +256,18 @@ impl TutorialView {
                             div()
                                 .text_size(px(14.0))
                                 .text_color(muted_color)
-                                .child(line.to_string()),
+                                .child(trimmed.to_string()),
                         )
                         .into_any_element(),
                 );
             } else {
-                // Regular paragraph text
                 elements.push(
                     div()
                         .text_size(px(16.0))
                         .text_color(text_color)
                         .mb(px(8.0))
                         .line_height(px(24.0))
-                        .child(line.to_string())
+                        .child(trimmed.to_string())
                         .into_any_element(),
                 );
             }
@@ -281,13 +321,7 @@ impl TutorialView {
                     .py(px(12.0))
                     .rounded(px(10.0))
                     .bg(if is_last { accent_color } else { button_color })
-                    .hover(|s| {
-                        s.bg(if is_last {
-                            rgb(0xa6c8ff)
-                        } else {
-                            button_hover
-                        })
-                    })
+                    .hover(|s| s.bg(if is_last { rgb(0xa6c8ff) } else { button_hover }))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         if this.current_step == TUTORIAL_STEPS.len() - 1 {

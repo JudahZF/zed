@@ -11,19 +11,11 @@ use gpui::{AnyWindowHandle, AsyncApp, Task, WeakEntity};
 use http_client::{AsyncBody, HttpClient, RedirectPolicy};
 use release_channel::ReleaseChannel;
 use remote::{RemoteClientDelegate as RemoteClientDelegateTrait, RemotePlatform};
-use serde::Deserialize;
 use semver::Version;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::connect_view::ConnectView;
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct ReleaseAsset {
-    url: String,
-    version: String,
-}
 
 /// iOS-specific implementation of `RemoteClientDelegate`.
 /// 

@@ -1,7 +1,7 @@
 # Zed for iPadOS - Implementation Plan
 
 > **Status:** Phase 4 In Progress - Remote connection working end-to-end  
-> **Target:** iOS 26+  
+> **Target:** iOS 18+  
 > **Approach:** Remote-first thin client  
 > **Primary Input:** Hardware keyboard
 

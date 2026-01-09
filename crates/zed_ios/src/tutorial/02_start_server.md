@@ -53,7 +53,7 @@ Description=Zed Remote Server
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/zed --remote-server
+ExecStart=zed --remote-server
 Restart=always
 
 [Install]

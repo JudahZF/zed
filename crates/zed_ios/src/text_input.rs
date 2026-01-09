@@ -133,24 +133,46 @@ impl TextInput {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        eprintln!("[TextInput] backspace called, cursor at {}, content len {}", self.cursor_offset(), self.content.len());
+        eprintln!(
+            "[TextInput] backspace called, cursor at {}, content len {}",
+            self.cursor_offset(),
+            self.content.len()
+        );
         if self.selected_range.is_empty() {
             let prev = self.previous_boundary(self.cursor_offset());
-            eprintln!("[TextInput] backspace: selecting from {} to {}", prev, self.cursor_offset());
+            eprintln!(
+                "[TextInput] backspace: selecting from {} to {}",
+                prev,
+                self.cursor_offset()
+            );
             self.select_to(prev, cx)
         }
-        eprintln!("[TextInput] backspace: replacing range {:?} with empty string", self.selected_range);
+        eprintln!(
+            "[TextInput] backspace: replacing range {:?} with empty string",
+            self.selected_range
+        );
         self.replace_text_in_range(None, "", window, cx)
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
-        eprintln!("[TextInput] delete called, cursor at {}, content len {}", self.cursor_offset(), self.content.len());
+        eprintln!(
+            "[TextInput] delete called, cursor at {}, content len {}",
+            self.cursor_offset(),
+            self.content.len()
+        );
         if self.selected_range.is_empty() {
             let next = self.next_boundary(self.cursor_offset());
-            eprintln!("[TextInput] delete: selecting from {} to {}", self.cursor_offset(), next);
+            eprintln!(
+                "[TextInput] delete: selecting from {} to {}",
+                self.cursor_offset(),
+                next
+            );
             self.select_to(next, cx)
         }
-        eprintln!("[TextInput] delete: replacing range {:?} with empty string", self.selected_range);
+        eprintln!(
+            "[TextInput] delete: replacing range {:?} with empty string",
+            self.selected_range
+        );
         self.replace_text_in_range(None, "", window, cx)
     }
 
@@ -281,7 +303,11 @@ impl EntityInputHandler for TextInput {
         })
     }
 
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
         self.marked_range
             .as_ref()
             .map(|range| range_to_utf16(&self.content, range.clone()))
@@ -503,95 +529,81 @@ impl Render for TextInput {
                             .text_size(px(16.0))
                             .text_color(current_text_color)
                             .child(text_to_show)
-                            .when(is_focused && !show_placeholder && selected_range.is_empty(), |el| {
-                                el.child(
-                                    div()
-                                        .w(px(2.0))
-                                        .h(px(20.0))
-                                        .bg(text_color)
-                                        .ml(px(-1.0)),
-                                )
-                            }),
+                            .when(
+                                is_focused && !show_placeholder && selected_range.is_empty(),
+                                |el| {
+                                    el.child(
+                                        div().w(px(2.0)).h(px(20.0)).bg(text_color).ml(px(-1.0)),
+                                    )
+                                },
+                            ),
                     )
                     .when(is_focused, |el| {
-                        el.on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                            let key: &str = event.keystroke.key.as_ref();
-                            
-                            eprintln!("[TextInput] on_key_down: key='{}', key_char={:?}, mods={:?}", 
-                                key, event.keystroke.key_char, event.keystroke.modifiers);
-                            
-                            // Skip empty keys
-                            if key.is_empty() {
-                                eprintln!("[TextInput] Skipping empty key");
-                                return;
-                            }
-                            
-                            // Skip unknown keys (from unmapped HID codes)
-                            if key.starts_with("unknown-") {
-                                eprintln!("[TextInput] Skipping unknown key: {}", key);
-                                return;
-                            }
-                            
-                            // Skip modifier-only keys - these don't produce text input
-                            let modifier_keys = [
-                                "shift", "control", "alt", "cmd", "capslock",
-                                "numlock", "scrolllock", "printscreen", "pause",
-                            ];
-                            if modifier_keys.contains(&key) {
-                                eprintln!("[TextInput] Skipping modifier key: {}", key);
-                                return;
-                            }
-                            
-                            // Skip function keys
-                            if key.starts_with("f") && key.len() <= 3 {
-                                if let Ok(_) = key[1..].parse::<u8>() {
-                                    eprintln!("[TextInput] Skipping function key: {}", key);
+                        el.on_key_down(cx.listener(
+                            |this, event: &gpui::KeyDownEvent, window, cx| {
+                                let key: &str = event.keystroke.key.as_ref();
+
+                                if key.is_empty() {
                                     return;
                                 }
-                            }
-                            
-                            // Handle backspace key directly
-                            if key == "backspace" {
-                                eprintln!("[TextInput] Handling backspace");
-                                this.backspace(&Backspace, window, cx);
-                                return;
-                            }
-                            
-                            // Handle delete key directly
-                            if key == "delete" {
-                                eprintln!("[TextInput] Handling delete");
-                                this.delete(&Delete, window, cx);
-                                return;
-                            }
-                            
-                            // Skip navigation keys - handled by actions
-                            let nav_keys = [
-                                "left", "right", "up", "down",
-                                "home", "end", "pageup", "pagedown",
-                                "insert", "escape", "tab",
-                            ];
-                            if nav_keys.contains(&key) {
-                                eprintln!("[TextInput] Skipping navigation key: {}", key);
-                                return;
-                            }
-                            
-                            // Handle character input
-                            if let Some(key_char) = &event.keystroke.key_char {
-                                // Skip control characters (except tab which we handle above)
-                                if key_char.chars().all(|c| c.is_control()) {
-                                    eprintln!("[TextInput] Skipping control character");
+
+                                if key.starts_with("unknown-") {
                                     return;
                                 }
-                                
-                                if !event.keystroke.modifiers.control
-                                    && !event.keystroke.modifiers.alt
-                                    && !event.keystroke.modifiers.platform
-                                {
-                                    eprintln!("[TextInput] Inserting text: '{}'", key_char);
-                                    this.replace_text_in_range(None, key_char, window, cx);
+
+                                let modifier_keys = [
+                                    "shift",
+                                    "control",
+                                    "alt",
+                                    "cmd",
+                                    "capslock",
+                                    "numlock",
+                                    "scrolllock",
+                                    "printscreen",
+                                    "pause",
+                                ];
+                                if modifier_keys.contains(&key) {
+                                    return;
                                 }
-                            }
-                        }))
+
+                                if key.starts_with("f") && key.len() <= 3 {
+                                    if let Ok(_) = key[1..].parse::<u8>() {
+                                        return;
+                                    }
+                                }
+
+                                if key == "backspace" {
+                                    this.backspace(&Backspace, window, cx);
+                                    return;
+                                }
+
+                                if key == "delete" {
+                                    this.delete(&Delete, window, cx);
+                                    return;
+                                }
+
+                                let nav_keys = [
+                                    "left", "right", "up", "down", "home", "end", "pageup",
+                                    "pagedown", "insert", "escape", "tab",
+                                ];
+                                if nav_keys.contains(&key) {
+                                    return;
+                                }
+
+                                if let Some(key_char) = &event.keystroke.key_char {
+                                    if key_char.chars().all(|c| c.is_control()) {
+                                        return;
+                                    }
+
+                                    if !event.keystroke.modifiers.control
+                                        && !event.keystroke.modifiers.alt
+                                        && !event.keystroke.modifiers.platform
+                                    {
+                                        this.replace_text_in_range(None, key_char, window, cx);
+                                    }
+                                }
+                            },
+                        ))
                     }),
             )
     }

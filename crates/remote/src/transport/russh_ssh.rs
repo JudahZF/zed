@@ -388,7 +388,7 @@ impl RusshRemoteConnection {
         match Self::run_command(session, "sh -c 'echo $SHELL'").await {
             Ok(output) => parse_shell(&output, DEFAULT_SHELL),
             Err(e) => {
-                log::error!("Failed to detect remote shell: {e}");
+                log::warn!("Failed to detect remote shell: {e}");
                 DEFAULT_SHELL.to_owned()
             }
         }
@@ -459,7 +459,7 @@ impl RusshRemoteConnection {
         match Self::run_command_tokio(session, "sh -c 'echo $SHELL'", cx).await {
             Ok(output) => Ok(parse_shell(&output, DEFAULT_SHELL)),
             Err(e) => {
-                log::error!("Failed to detect remote shell: {e}");
+                log::warn!("Failed to detect remote shell: {e}");
                 Ok(DEFAULT_SHELL.to_owned())
             }
         }
@@ -850,12 +850,6 @@ impl RemoteConnection for RusshRemoteConnection {
                     self.ssh_shell_kind.sequential_and_commands_separator()
                 )?;
             }
-        } else {
-            write!(
-                exec,
-                "cd {} ",
-                self.ssh_shell_kind.sequential_and_commands_separator()
-            )?;
         };
         write!(exec, "exec env ")?;
 
@@ -1115,7 +1109,7 @@ async fn handle_rpc_over_ssh_channel(
 
     if !stderr_output.is_empty() {
         let stderr_str = String::from_utf8_lossy(&stderr_output);
-        log::error!("Remote process stderr output: {}", stderr_str);
+        log::warn!("Remote process stderr output: {}", stderr_str);
     }
 
     let final_exit_code = exit_code.unwrap_or(0) as i32;
