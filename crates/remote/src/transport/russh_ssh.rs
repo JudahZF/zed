@@ -324,7 +324,15 @@ impl RusshRemoteConnection {
         session: &client::Handle<RusshHandler>,
         command: &str,
     ) -> Result<String> {
-        let mut channel = session.channel_open_session().await?;
+        let channel = session.channel_open_session().await?;
+        Self::run_command_on_channel(channel, command).await
+    }
+
+    /// Run a command on an already-opened channel
+    async fn run_command_on_channel(
+        mut channel: russh::Channel<russh::client::Msg>,
+        command: &str,
+    ) -> Result<String> {
         channel.exec(true, command).await?;
 
         let mut output = Vec::new();
@@ -430,9 +438,14 @@ impl RusshRemoteConnection {
         let session = session.clone();
         let command = command.to_string();
         Tokio::spawn_result(cx, async move {
-            let guard = session.lock().await;
-            let session_ref = guard.as_ref().ok_or_else(|| anyhow!("SSH session not available"))?;
-            Self::run_command(session_ref, &command).await
+            // Open the channel while holding the lock, then release it
+            let channel = {
+                let guard = session.lock().await;
+                let session_ref = guard.as_ref().ok_or_else(|| anyhow!("SSH session not available"))?;
+                session_ref.channel_open_session().await?
+            };
+            // Now run the command without holding the session lock
+            Self::run_command_on_channel(channel, &command).await
         })?.await
     }
 
@@ -1008,13 +1021,6 @@ async fn upload_directory_recursive(
             file.shutdown().await?;
         }
     }
-    let final_exit_code = match exit_code {
-        Some(code) => code as i32,
-        None => {
-            log::warn!("No exit status received from remote process");
-            -1 // Or return an error
-        }
-    };
     Ok(())
 }
 

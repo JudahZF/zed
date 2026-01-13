@@ -10,11 +10,7 @@ Open a terminal on your remote machine and run:
 zed --remote-server
 ```
 
-The server will start and display a message like:
-
-```
-Remote server listening on 127.0.0.1:4545
-```
+The server will start and display a status message indicating it's ready.
 
 ## Keep the Server Running
 

@@ -86,7 +86,7 @@ impl ConnectView {
 
         let db = ConnectionDb::open()
             .map_err(|e| {
-                eprintln!("[Zed iOS] Failed to open connection database: {}", e);
+                log::warn!("Failed to open connection database: {}", e);
                 e
             })
             .ok();
@@ -168,18 +168,10 @@ impl ConnectView {
             username, hostname, port
         );
 
-        if let Some(db) = &self.db {
-            if let Err(e) = db.save_connection(&hostname, &username, port, None) {
-                log::error!("[Zed iOS] Failed to save connection: {}", e);
-            } else {
-                self.reload_recent_connections();
-            }
-        }
-
         // Create SSH connection options
         let connection_options = SshConnectionOptions {
-            host: hostname.into(),
-            username: Some(username),
+            host: hostname.clone().into(),
+            username: Some(username.clone()),
             port: Some(port),
             password: None,
             args: None,
@@ -211,6 +203,14 @@ impl ConnectView {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(client) => {
+                        // Save connection only after successful connection
+                        if let Some(db) = &this.db {
+                            if let Err(e) = db.save_connection(&hostname, &username, port, None) {
+                                log::warn!("Failed to save connection: {}", e);
+                            } else {
+                                this.reload_recent_connections();
+                            }
+                        }
                         this.state = ConnectionState::Connected;
                         this.status_message = Some("Connected!".to_string());
                         cx.emit(ConnectionSucceeded { client });
@@ -323,7 +323,7 @@ impl ConnectView {
 
         if let Some(db) = &self.db {
             if let Err(e) = db.touch_connection(connection.id) {
-                eprintln!("[Zed iOS] Failed to update connection timestamp: {}", e);
+                log::warn!("Failed to update connection timestamp: {}", e);
             }
         }
 

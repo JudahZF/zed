@@ -133,46 +133,18 @@ impl TextInput {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        eprintln!(
-            "[TextInput] backspace called, cursor at {}, content len {}",
-            self.cursor_offset(),
-            self.content.len()
-        );
         if self.selected_range.is_empty() {
             let prev = self.previous_boundary(self.cursor_offset());
-            eprintln!(
-                "[TextInput] backspace: selecting from {} to {}",
-                prev,
-                self.cursor_offset()
-            );
             self.select_to(prev, cx)
         }
-        eprintln!(
-            "[TextInput] backspace: replacing range {:?} with empty string",
-            self.selected_range
-        );
         self.replace_text_in_range(None, "", window, cx)
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
-        eprintln!(
-            "[TextInput] delete called, cursor at {}, content len {}",
-            self.cursor_offset(),
-            self.content.len()
-        );
         if self.selected_range.is_empty() {
             let next = self.next_boundary(self.cursor_offset());
-            eprintln!(
-                "[TextInput] delete: selecting from {} to {}",
-                self.cursor_offset(),
-                next
-            );
             self.select_to(next, cx)
         }
-        eprintln!(
-            "[TextInput] delete: replacing range {:?} with empty string",
-            self.selected_range
-        );
         self.replace_text_in_range(None, "", window, cx)
     }
 

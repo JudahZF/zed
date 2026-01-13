@@ -12,10 +12,66 @@ use http_client::{AsyncBody, HttpClient, RedirectPolicy};
 use release_channel::ReleaseChannel;
 use remote::{RemoteClientDelegate as RemoteClientDelegateTrait, RemotePlatform};
 use semver::Version;
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::connect_view::ConnectView;
+
+/// Release asset metadata from cloud.zed.dev
+#[derive(Deserialize)]
+struct ReleaseAsset {
+    url: String,
+    #[serde(default)]
+    version: String,
+}
+
+/// Fetches release asset metadata from cloud.zed.dev
+async fn fetch_release_asset(
+    http_client: &Arc<dyn HttpClient>,
+    channel: &str,
+    version: Option<&Version>,
+    os: &str,
+    arch: &str,
+) -> Result<ReleaseAsset> {
+    let version_str = version
+        .map(|v| {
+            let mut v = v.clone();
+            v.pre = semver::Prerelease::EMPTY;
+            v.build = semver::BuildMetadata::EMPTY;
+            v.to_string()
+        })
+        .unwrap_or_else(|| "latest".to_string());
+
+    let url = format!(
+        "https://cloud.zed.dev/releases/{}/{}/asset?os={}&arch={}&asset=zed-remote-server",
+        channel, version_str, os, arch
+    );
+
+    log::info!("Fetching remote server release info from: {}", url);
+
+    let request = http_client::Request::builder()
+        .uri(&url)
+        .extension(RedirectPolicy::FollowAll)
+        .body(AsyncBody::empty())?;
+
+    let mut response = http_client.send(request).await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "Failed to fetch release info: HTTP {}",
+            response.status()
+        );
+    }
+
+    let mut body = Vec::new();
+    response.body_mut().read_to_end(&mut body).await?;
+
+    let asset: ReleaseAsset = serde_json::from_slice(&body)
+        .context("Failed to parse release asset response")?;
+
+    Ok(asset)
+}
 
 /// iOS-specific implementation of `RemoteClientDelegate`.
 /// 
@@ -47,13 +103,13 @@ impl IosRemoteClientDelegate {
     }
     
     fn update_status(&self, status: Option<&str>, cx: &mut AsyncApp) {
-        self.window
-            .update(cx, |_, _, cx| {
-                self.connect_view.update(cx, |view, cx| {
-                    view.set_connection_status(status.map(|s| s.to_string()), cx);
-                })
+        if let Err(e) = self.window.update(cx, |_, _, cx| {
+            self.connect_view.update(cx, |view, cx| {
+                view.set_connection_status(status.map(|s| s.to_string()), cx);
             })
-            .ok();
+        }) {
+            log::debug!("Failed to update connection status UI: {}", e);
+        }
     }
 }
 
@@ -71,13 +127,13 @@ impl RemoteClientDelegateTrait for IosRemoteClientDelegate {
         }
 
         // Otherwise, show the password prompt in the UI
-        self.window
-            .update(cx, |_, _, cx| {
-                self.connect_view.update(cx, |view, cx| {
-                    view.show_password_prompt(prompt, tx, cx);
-                })
+        if let Err(e) = self.window.update(cx, |_, _, cx| {
+            self.connect_view.update(cx, |view, cx| {
+                view.show_password_prompt(prompt, tx, cx);
             })
-            .ok();
+        }) {
+            log::debug!("Failed to show password prompt UI: {}", e);
+        }
     }
 
     fn set_status(&self, status: Option<&str>, cx: &mut AsyncApp) {
@@ -97,48 +153,13 @@ impl RemoteClientDelegateTrait for IosRemoteClientDelegate {
         let http_client = self.http_client.clone();
         
         cx.spawn(async move |_cx| {
-            let version_str = version
-                .as_ref()
-                .map(|v| {
-                    let mut v = v.clone();
-                    v.pre = semver::Prerelease::EMPTY;
-                    v.build = semver::BuildMetadata::EMPTY;
-                    v.to_string()
-                })
-                .unwrap_or_else(|| "latest".to_string());
-            
-            // Fetch the release asset metadata from cloud.zed.dev
-            let url = format!(
-                "https://cloud.zed.dev/releases/{}/{}/asset?os={}&arch={}&asset=zed-remote-server",
-                channel, version_str, os, arch
-            );
-            
-            log::info!("Fetching remote server release info from: {}", url);
-            
-            let request = http_client::Request::builder()
-                .uri(&url)
-                .extension(RedirectPolicy::FollowAll)
-                .body(AsyncBody::empty())?;
-            
-            let mut response = http_client.send(request).await?;
-            
-            if !response.status().is_success() {
-                anyhow::bail!(
-                    "Failed to fetch release info: HTTP {}",
-                    response.status()
-                );
-            }
-            
-            let mut body = Vec::new();
-            response.body_mut().read_to_end(&mut body).await?;
-            
-            #[derive(serde::Deserialize)]
-            struct ReleaseAsset {
-                url: String,
-            }
-            
-            let asset: ReleaseAsset = serde_json::from_slice(&body)
-                .context("Failed to parse release asset response")?;
+            let asset = fetch_release_asset(
+                &http_client,
+                &channel,
+                version.as_ref(),
+                &os,
+                &arch,
+            ).await?;
             
             log::info!("Remote server download URL: {}", asset.url);
             Ok(Some(asset.url))
@@ -161,49 +182,13 @@ impl RemoteClientDelegateTrait for IosRemoteClientDelegate {
         cx.spawn(async move |mut cx| {
             this.update_status(Some("Fetching remote server release"), &mut cx);
             
-            let version_str = version
-                .as_ref()
-                .map(|v| {
-                    let mut v = v.clone();
-                    v.pre = semver::Prerelease::EMPTY;
-                    v.build = semver::BuildMetadata::EMPTY;
-                    v.to_string()
-                })
-                .unwrap_or_else(|| "latest".to_string());
-            
-            // Fetch the release asset metadata
-            let url = format!(
-                "https://cloud.zed.dev/releases/{}/{}/asset?os={}&arch={}&asset=zed-remote-server",
-                channel, version_str, os, arch
-            );
-            
-            log::info!("Fetching remote server release info from: {}", url);
-            
-            let request = http_client::Request::builder()
-                .uri(&url)
-                .extension(RedirectPolicy::FollowAll)
-                .body(AsyncBody::empty())?;
-            
-            let mut response = http_client.send(request).await?;
-            
-            if !response.status().is_success() {
-                anyhow::bail!(
-                    "Failed to fetch release info: HTTP {}",
-                    response.status()
-                );
-            }
-            
-            let mut body = Vec::new();
-            response.body_mut().read_to_end(&mut body).await?;
-            
-            #[derive(serde::Deserialize)]
-            struct ReleaseAsset {
-                url: String,
-                version: String,
-            }
-            
-            let asset: ReleaseAsset = serde_json::from_slice(&body)
-                .context("Failed to parse release asset response")?;
+            let asset = fetch_release_asset(
+                &http_client,
+                &channel,
+                version.as_ref(),
+                &os,
+                &arch,
+            ).await?;
             
             // Create the download directory structure
             let servers_dir = paths::remote_servers_dir();
