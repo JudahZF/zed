@@ -52,8 +52,10 @@ Once connected, you'll see your remote filesystem and can start editing code!
 
 - Use a stable WiFi connection
 - Keep your iPad charged or plugged in during long coding sessions
-- The connection will automatically reconnect if briefly interrupted
-- Your open files and cursor positions are preserved across sessions
+- Brief network interruptions may allow automatic reconnection (depends on server state and interruption duration)
+- Session state (open files, cursor positions) may be preserved when reconnecting to the same server session
+
+> **Note**: Reconnection and session persistence features depend on the remote server maintaining its state. If the server restarts or the session times out, you may need to reconnect manually and reopen your files.
 
 ## Getting Help
 

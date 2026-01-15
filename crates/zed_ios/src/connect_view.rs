@@ -241,10 +241,12 @@ impl ConnectView {
         let connection = remote::connect(connection_options, delegate.clone(), cx).await?;
 
         // Create the RemoteClient
-        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        // Keep cancel_tx alive until RemoteClient::new completes, otherwise the
+        // cancellation receiver will resolve immediately and return None.
+        let (cancel_tx, cancel_rx) = oneshot::channel();
         let identifier = ConnectionIdentifier::setup();
         
-        let client = cx.update(|cx| {
+        let client_task = cx.update(|cx| {
             RemoteClient::new(
                 identifier,
                 connection,
@@ -252,7 +254,13 @@ impl ConnectView {
                 delegate,
                 cx,
             )
-        })?.await?;
+        })?;
+        
+        // Await the client task while keeping cancel_tx alive
+        let client = client_task.await?;
+        
+        // Explicitly drop cancel_tx after the task completes to make the intent clear
+        drop(cancel_tx);
 
         client.ok_or_else(|| anyhow::anyhow!("Failed to create remote client"))
     }

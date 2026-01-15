@@ -59,8 +59,8 @@ pub struct RusshRemoteConnection {
 /// 2. If the host key differs from a known entry (key changed), reject with error
 /// 3. If the host is not in known_hosts, accept and learn the key (TOFU - Trust On First Use)
 /// 
-/// On iOS, the known_hosts file is stored in the app's Documents directory since
-/// the traditional ~/.ssh/known_hosts is not accessible.
+/// Uses the standard ~/.ssh/known_hosts location. On platforms where ~/.ssh may not
+/// exist (like iOS), the directory is created automatically when learning a new host key.
 struct RusshHandler {
     /// The hostname being connected to (used for known_hosts lookup)
     host: String,
@@ -74,9 +74,19 @@ impl RusshHandler {
     }
     
     /// Get the path to the known_hosts file.
-    /// On iOS, we use the app's home directory since ~/.ssh is not accessible.
+    /// Uses the standard ~/.ssh/known_hosts location.
     fn known_hosts_path() -> Option<std::path::PathBuf> {
         home::home_dir().map(|home| home.join(".ssh").join("known_hosts"))
+    }
+    
+    /// Ensure the parent directory for known_hosts exists.
+    fn ensure_ssh_dir_exists(known_hosts_path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = known_hosts_path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -119,6 +129,10 @@ impl client::Handler for RusshHandler {
                     "No known_hosts file found; learning host key for {}:{}",
                     host, port
                 );
+                // Ensure the .ssh directory exists before writing
+                if let Err(e) = Self::ensure_ssh_dir_exists(&known_hosts_path) {
+                    log::warn!("Failed to create .ssh directory: {}", e);
+                }
                 if let Err(e) = learn_known_hosts_path(&host, port, &pubkey, &known_hosts_path) {
                     log::warn!("Failed to save host key to known_hosts: {}", e);
                     // Still accept the connection even if we couldn't save
@@ -158,13 +172,14 @@ impl client::Handler for RusshHandler {
                     Err(russh::Error::Keys(russh::keys::Error::KeyChanged { line }))
                 }
                 Err(e) => {
-                    // Other error (e.g., parse error in known_hosts)
-                    log::warn!(
-                        "Error checking known_hosts for {}:{}: {}; accepting key",
-                        host, port, e
+                    // Parse or IO error in known_hosts - fail closed to maintain TOFU guarantees.
+                    // Accepting on error would effectively be "trust always" which undermines security.
+                    log::error!(
+                        "Failed to verify host key for {}:{} due to known_hosts error: {}. \
+                         Connection rejected. Please check your known_hosts file at {:?}",
+                        host, port, e, known_hosts_path
                     );
-                    // Accept the connection despite the error to avoid blocking legitimate use
-                    Ok(true)
+                    Err(russh::Error::Keys(e))
                 }
             }
         }
@@ -186,11 +201,11 @@ impl RusshRemoteConnection {
 
         log::info!("Connecting to SSH server at {}", addr);
 
-        // Get the username
+        // Get the username - require it to be provided, don't default to "root"
         let username = connection_options
             .username
             .clone()
-            .unwrap_or_else(|| "root".to_string());
+            .ok_or_else(|| anyhow::anyhow!("SSH username is required but was not provided"))?;
 
         // First, try to connect and authenticate without a password (on Tokio)
         let initial_password = connection_options.password.clone();
@@ -776,25 +791,39 @@ impl RusshRemoteConnection {
         let orig_tmp_path = tmp_path.display(self.path_style());
         let dst_path_str = dst_path.display(self.path_style());
 
+        // Shell-escape paths by replacing ' with '\'' (end quote, escaped quote, start quote)
+        fn shell_escape(s: &str) -> String {
+            format!("'{}'", s.replace('\'', "'\\''"))
+        }
+
         let script = if let Some(tmp_path_str) = orig_tmp_path.strip_suffix(".gz") {
             format!(
-                "gunzip -f '{}' && chmod {:o} '{}' && mv '{}' '{}'",
-                orig_tmp_path, server_mode, tmp_path_str, tmp_path_str, dst_path_str
+                "gunzip -f {} && chmod {:o} {} && mv {} {}",
+                shell_escape(&orig_tmp_path),
+                server_mode,
+                shell_escape(tmp_path_str),
+                shell_escape(tmp_path_str),
+                shell_escape(&dst_path_str)
             )
         } else {
             format!(
-                "chmod {:o} '{}' && mv '{}' '{}'",
-                server_mode, orig_tmp_path, orig_tmp_path, dst_path_str
+                "chmod {:o} {} && mv {} {}",
+                server_mode,
+                shell_escape(&orig_tmp_path),
+                shell_escape(&orig_tmp_path),
+                shell_escape(&dst_path_str)
             )
         };
 
         log::info!("Extracting server binary with script: {}", script);
-        let result = Self::run_command(session, &format!("sh -c '{}'", script)).await;
+        // Run the script directly - SSH exec runs commands in a shell,
+        // so no need for an extra sh -c wrapper
+        let result = Self::run_command(session, &script).await;
         log::info!("Extract result: {:?}", result);
         result?;
         
         // Verify the binary exists and is executable
-        let verify_cmd = format!("{} version", dst_path_str);
+        let verify_cmd = format!("{} version", shell_escape(&dst_path_str));
         log::info!("Verifying binary with: {}", verify_cmd);
         match Self::run_command(session, &verify_cmd).await {
             Ok(output) => log::info!("Binary verification output: {}", output.trim()),
@@ -867,6 +896,21 @@ impl RemoteConnection for RusshRemoteConnection {
         write!(exec, "exec env ")?;
 
         for (k, v) in input_env.iter() {
+            // Validate env var name to prevent command injection.
+            // Valid identifiers: start with letter or underscore, followed by letters, digits, or underscores.
+            let is_valid_env_name = !k.is_empty()
+                && k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            
+            if !is_valid_env_name {
+                anyhow::bail!(
+                    "Invalid environment variable name {:?} in build_command: \
+                     names must match [A-Za-z_][A-Za-z0-9_]* (shell kind: {:?})",
+                    k,
+                    self.ssh_shell_kind
+                );
+            }
+            
             write!(
                 exec,
                 "{}={} ",
