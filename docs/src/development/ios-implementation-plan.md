@@ -1,7 +1,7 @@
 # Zed for iPadOS - Implementation Plan
 
-> **Status:** Phase 1 Complete - GPUI compiles for iOS  
-> **Target:** iOS 26+  
+> **Status:** Phase 4 In Progress - Remote connection established (UI polish remaining)  
+> **Target:** iOS 18+  
 > **Approach:** Remote-first thin client  
 > **Primary Input:** Hardware keyboard
 
@@ -56,24 +56,24 @@ This document outlines the implementation plan for bringing Zed to iPadOS as a r
 - [x] 1.6 Add conditional compilation to platform.rs
 - [x] **Milestone: GPUI compiles for iOS target**
 
-### Phase 2: iOS App Crate
-- [ ] 2.1 Create `crates/zed_ios` crate structure
-- [ ] 2.2 Implement app entry point
-- [ ] 2.3 Set up Xcode project
-- [ ] **Milestone: App launches and shows GPUI content**
+### Phase 2: iOS App Crate ✅ COMPLETE
+- [x] 2.1 Create `crates/zed_ios` crate structure
+- [x] 2.2 Implement app entry point
+- [x] 2.3 Set up Xcode project
+- [x] **Milestone: App launches and shows GPUI content**
 
-### Phase 3: Connection & Tutorial UI
-- [ ] 3.1 Implement `ConnectView` (connection UI)
-- [ ] 3.2 Wire up remote connection logic
-- [ ] 3.3 Create tutorial content
-- [ ] 3.4 Implement `TutorialView`
-- [ ] 3.5 Implement connection storage (Keychain)
-- [ ] **Milestone: Can connect to remote server**
+### Phase 3: Connection & Tutorial UI ✅ COMPLETE
+- [x] 3.1 Implement `ConnectView` (connection UI)
+- [x] 3.2 Wire up remote connection logic
+- [x] 3.3 Create tutorial content
+- [x] 3.4 Implement `TutorialView`
+- [x] 3.5 Implement connection storage (SQLite)
+- [x] **Milestone: Can connect to remote server**
 
-### Phase 4: Feature Adaptations
-- [ ] 4.1 Add feature gates for iOS-unavailable features
-- [ ] 4.2 Hide/disable local-only UI elements
-- [ ] 4.3 Test full editor workflow over remote
+### Phase 4: Feature Adaptations 🚧 IN PROGRESS
+- [x] 4.1 Add feature gates for iOS-unavailable features
+- [x] 4.2 Hide/disable local-only UI elements
+- [x] 4.3 Test full editor workflow over remote ✅ **Remote connection working!**
 - [ ] 4.4 UI adjustments (safe area, etc.)
 - [ ] **Milestone: Can edit remote files end-to-end**
 

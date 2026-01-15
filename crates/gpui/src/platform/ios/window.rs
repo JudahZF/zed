@@ -7,8 +7,8 @@
 use super::metal_atlas::MetalAtlas;
 use super::{
     events::{
-        translate_key_press, translate_modifiers_changed, translate_pan_to_scroll,
-        translate_touch_to_mouse, UIKeyModifierFlags,
+        ios_keyboard_log, translate_key_press, translate_modifiers_changed,
+        translate_pan_to_scroll, translate_touch_to_mouse, UIKeyModifierFlags,
     },
     metal_renderer::MetalRenderer,
     BoolExt, CGPoint, CGRect, CGSize, UIEdgeInsets,
@@ -117,6 +117,23 @@ unsafe fn register_view_class() -> &'static Class {
         can_become_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
     );
 
+    // UIKeyInput protocol for software keyboard support
+    if let Some(protocol) = Protocol::get("UIKeyInput") {
+        decl.add_protocol(protocol);
+    }
+    decl.add_method(
+        sel!(insertText:),
+        insert_text as extern "C" fn(&Object, Sel, *mut Object),
+    );
+    decl.add_method(
+        sel!(deleteBackward),
+        delete_backward as extern "C" fn(&Object, Sel),
+    );
+    decl.add_method(
+        sel!(hasText),
+        has_text as extern "C" fn(&Object, Sel) -> BOOL,
+    );
+
     // Layout
     decl.add_method(
         sel!(layoutSubviews),
@@ -221,16 +238,31 @@ fn handle_touches(view: &Object, touches: *mut Object, _phase: &str) {
 }
 
 extern "C" fn presses_began(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
-    handle_presses(this, presses, true);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_presses(this, presses, true);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_began: {:?}", e);
+    }
 }
 
 extern "C" fn presses_ended(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
-    handle_presses(this, presses, false);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_presses(this, presses, false);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_ended: {:?}", e);
+    }
 }
 
 extern "C" fn presses_changed(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
     // Changed is used for pressure-sensitive keys, treat as key down
-    handle_presses(this, presses, true);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_presses(this, presses, true);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_changed: {:?}", e);
+    }
 }
 
 extern "C" fn presses_cancelled(
@@ -239,45 +271,204 @@ extern "C" fn presses_cancelled(
     presses: *mut Object,
     _event: *mut Object,
 ) {
-    handle_presses(this, presses, false);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_presses(this, presses, false);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_cancelled: {:?}", e);
+    }
 }
 
 fn handle_presses(view: &Object, presses: *mut Object, is_key_down: bool) {
     unsafe {
+        // Early null check for presses
+        if presses.is_null() {
+            ios_keyboard_log("handle_presses: presses is null, returning early");
+            return;
+        }
+
         let Some(state) = get_window_state(view) else {
+            ios_keyboard_log("handle_presses: could not get window state");
             return;
         };
 
         let count: usize = msg_send![presses, count];
+        ios_keyboard_log(&format!(
+            "handle_presses: count={}, is_key_down={}",
+            count, is_key_down
+        ));
+
+        if count == 0 {
+            return;
+        }
+
         let all_objects: *mut Object = msg_send![presses, allObjects];
+        if all_objects.is_null() {
+            ios_keyboard_log("handle_presses: allObjects is null");
+            return;
+        }
 
         for i in 0..count {
             let press: *mut Object = msg_send![all_objects, objectAtIndex: i];
+            if press.is_null() {
+                ios_keyboard_log(&format!("handle_presses: press {} is null, skipping", i));
+                continue;
+            }
+            ios_keyboard_log(&format!("Processing press {}/{}", i + 1, count));
 
-            // Check if this is a repeat
+            // Check if this is a repeat - key may be null for non-keyboard presses
             let key: *mut Object = msg_send![press, key];
             let is_repeat: bool = if !key.is_null() {
                 msg_send![press, isRepeating]
             } else {
+                ios_keyboard_log("handle_presses: key is null (not a keyboard press?)");
                 false
             };
 
+            // Skip non-keyboard presses entirely
+            if key.is_null() {
+                ios_keyboard_log("handle_presses: skipping non-keyboard press");
+                continue;
+            }
+
             // Update modifier state from hardware keyboard and dispatch ModifiersChangedEvent if changed
-            if !key.is_null() {
-                let modifier_flags: i64 = msg_send![key, modifierFlags];
-                let new_modifiers = UIKeyModifierFlags(modifier_flags).to_modifiers();
-                let old_modifiers = state.modifiers.lock().clone();
-                if new_modifiers != old_modifiers {
-                    *state.modifiers.lock() = new_modifiers;
-                    let modifiers_event = translate_modifiers_changed(modifier_flags);
-                    dispatch_event(&state, modifiers_event);
+            let modifier_flags: i64 = msg_send![key, modifierFlags];
+            let new_modifiers = UIKeyModifierFlags(modifier_flags).to_modifiers();
+            let old_modifiers = state.modifiers.lock().clone();
+            if new_modifiers != old_modifiers {
+                *state.modifiers.lock() = new_modifiers;
+                let modifiers_event = translate_modifiers_changed(modifier_flags);
+                dispatch_event(&state, modifiers_event);
+            }
+
+            // Translate the key press - this should not panic now with all the null checks
+            if let Some(event) = translate_key_press(press, is_key_down, is_repeat) {
+                ios_keyboard_log(&format!("Dispatching key event for press {}", i + 1));
+                dispatch_event(&state, event);
+            } else {
+                ios_keyboard_log(&format!("No event generated for press {}", i + 1));
+            }
+        }
+    }
+}
+
+extern "C" fn insert_text(this: &Object, _sel: Sel, text: *mut Object) {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        if text.is_null() {
+            return;
+        }
+
+        let c_str: *const i8 = msg_send![text, UTF8String];
+        if c_str.is_null() {
+            return;
+        }
+
+        let text_str = match std::ffi::CStr::from_ptr(c_str).to_str() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        if text_str.is_empty() {
+            return;
+        }
+
+        // First try to use the input handler if one is registered
+        let handled = with_input_handler(&state, |input_handler| {
+            input_handler.replace_text_in_range(None, text_str);
+        })
+        .is_some();
+
+        // If no input handler, dispatch as a KeyDown event with key_char
+        // so that elements using on_key_down can receive it
+        if !handled {
+            let keystroke = crate::Keystroke {
+                key: text_str.into(),
+                modifiers: Modifiers::default(),
+                key_char: Some(text_str.to_string()),
+            };
+
+            let event = PlatformInput::KeyDown(crate::KeyDownEvent {
+                keystroke,
+                is_held: false,
+                prefer_character_input: true,
+            });
+
+            dispatch_event(&state, event);
+        }
+    }
+}
+
+extern "C" fn delete_backward(this: &Object, _sel: Sel) {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        let keystroke = crate::Keystroke {
+            key: "backspace".into(),
+            modifiers: Modifiers::default(),
+            key_char: None,
+        };
+
+        let event = PlatformInput::KeyDown(crate::KeyDownEvent {
+            keystroke,
+            is_held: false,
+            prefer_character_input: false,
+        });
+
+        dispatch_event(&state, event);
+    }
+}
+
+extern "C" fn has_text(this: &Object, _sel: Sel) -> BOOL {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return NO;
+        };
+
+        let has = with_input_handler(&state, |input_handler| {
+            // Check if there's a selection with text, or if cursor is past position 0
+            if let Some(sel) = input_handler.selected_text_range(false) {
+                if sel.range.len() > 0 || sel.range.start > 0 {
+                    return true;
                 }
             }
 
-            if let Some(event) = translate_key_press(press, is_key_down, is_repeat) {
-                dispatch_event(&state, event);
-            }
+            // Cursor might be at position 0, but document could still have text.
+            // Check if there's any text in the document by requesting text from the start.
+            let mut adjusted = None;
+            input_handler
+                .text_for_range(0..1, &mut adjusted)
+                .is_some_and(|text| !text.is_empty())
+        })
+        .unwrap_or(false);
+
+        if has {
+            YES
+        } else {
+            NO
         }
+    }
+}
+
+fn with_input_handler<F, R>(state: &WindowState, f: F) -> Option<R>
+where
+    F: FnOnce(&mut crate::platform::PlatformInputHandler) -> R,
+{
+    let mut input_handler = state.input_handler.lock().take()?;
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut input_handler)));
+
+    // Always restore the input handler, even if f panicked
+    *state.input_handler.lock() = Some(input_handler);
+
+    match result {
+        Ok(value) => Some(value),
+        Err(panic) => std::panic::resume_unwind(panic),
     }
 }
 
@@ -388,7 +579,10 @@ extern "C" fn safe_area_insets_did_change(this: &Object, _sel: Sel) {
                 let bounds: CGRect = msg_send![view, bounds];
                 let size = bounds.size;
                 let scale = *state.scale_factor.lock();
-                callback(crate::size(px(size.width as f32), px(size.height as f32)), scale);
+                callback(
+                    crate::size(px(size.width as f32), px(size.height as f32)),
+                    scale,
+                );
             }
         }
     }
@@ -423,7 +617,12 @@ unsafe fn get_window_state(obj: &Object) -> Option<Arc<WindowState>> {
 }
 fn dispatch_event(state: &WindowState, event: PlatformInput) {
     if let Some(callback) = state.input_callback.lock().as_mut() {
-        callback(event);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            callback(event);
+        }));
+        if let Err(e) = result {
+            log::error!("Panic in dispatch_event: {:?}", e);
+        }
     }
 }
 
@@ -475,14 +674,14 @@ fn ensure_display_link_class_registered() {
 unsafe fn register_display_link_target_class() -> &'static Class {
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("GPUIDisplayLinkTarget", superclass).unwrap();
-    
+
     decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
-    
+
     decl.add_method(
         sel!(step:),
         display_link_step as extern "C" fn(&Object, Sel, *mut Object),
     );
-    
+
     decl.register()
 }
 
@@ -491,7 +690,7 @@ extern "C" fn display_link_step(this: &Object, _sel: Sel, _display_link: *mut Ob
         let Some(state) = get_window_state(this) else {
             return;
         };
-        
+
         if let Some(callback) = state.request_frame_callback.lock().as_mut() {
             callback(RequestFrameOptions {
                 require_presentation: true,
@@ -500,7 +699,6 @@ extern "C" fn display_link_step(this: &Object, _sel: Sel, _display_link: *mut Ob
         }
     }
 }
-
 
 impl IosWindow {
     pub fn new(
@@ -539,14 +737,14 @@ impl IosWindow {
             // we can add the renderer's CAMetalLayer as a sublayer for rendering.
             let view_layer: *mut Object = msg_send![view, layer];
             let renderer_layer = renderer.layer_ptr();
-            
+
             // Make view layer transparent so we can see through to the Metal layer
             let clear_color: *mut Object = msg_send![class!(UIColor), clearColor];
             let _: () = msg_send![view, setBackgroundColor: clear_color];
             let _: () = msg_send![view_layer, setBackgroundColor: std::ptr::null::<c_void>()];
-            
+
             let _: () = msg_send![view_layer, addSublayer: renderer_layer];
-            
+
             // Configure the renderer's layer to fill the view
             let _: () = msg_send![renderer_layer, setFrame: screen_bounds];
             let _: () = msg_send![renderer_layer, setContentsScale: scale];
@@ -589,7 +787,7 @@ impl IosWindow {
             let vc_weak_ptr =
                 view_controller_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
             (*view_controller).set_ivar(WINDOW_STATE_IVAR, vc_weak_ptr);
-            
+
             // Create display link target object. The alloc+init gives us ownership with
             // retain count 1. CADisplayLink's displayLinkWithTarget:selector: creates a
             // strong reference to its target (retain count becomes 2). In Drop, we must
@@ -598,23 +796,25 @@ impl IosWindow {
             let display_link_target_class = *DISPLAY_LINK_TARGET_CLASS.get().unwrap();
             let display_link_target: *mut Object = msg_send![display_link_target_class, alloc];
             let display_link_target: *mut Object = msg_send![display_link_target, init];
-            let dl_weak_ptr = display_link_target_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
+            let dl_weak_ptr =
+                display_link_target_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
             (*display_link_target).set_ivar(WINDOW_STATE_IVAR, dl_weak_ptr);
-            
+
             // Create CADisplayLink
             let display_link: *mut Object = msg_send![
                 class!(CADisplayLink),
                 displayLinkWithTarget: display_link_target
                 selector: sel!(step:)
             ];
-            
+
             // Add display link to main run loop
             let run_loop: *mut Object = msg_send![class!(NSRunLoop), mainRunLoop];
-            let _: () = msg_send![display_link, addToRunLoop: run_loop forMode: NSRunLoopCommonModes];
-            
+            let _: () =
+                msg_send![display_link, addToRunLoop: run_loop forMode: NSRunLoopCommonModes];
+
             // Store display link in state so we can stop it later
             *state.display_link.lock() = Some(display_link);
-            
+
             // Set up the view hierarchy
             let _: () = msg_send![view_controller, setView: view];
             let _: () = msg_send![ui_window, setRootViewController: view_controller];
@@ -624,7 +824,7 @@ impl IosWindow {
 
             // Make the window visible
             let _: () = msg_send![ui_window, makeKeyAndVisible];
-            
+
             // Request initial display - this ensures the layer gets drawn
             let _: () = msg_send![view, setNeedsDisplay];
             let _: () = msg_send![renderer_layer, setNeedsDisplay];
@@ -949,7 +1149,7 @@ impl Drop for IosWindow {
             if let Some(display_link) = self.state.display_link.lock().take() {
                 let _: () = msg_send![display_link, invalidate];
             }
-            
+
             // Clear the weak reference pointers in Objective-C objects.
             // This prevents any further attempts to access the state from callbacks.
             // Note: The weak references themselves (view_weak, view_controller_weak)
@@ -959,7 +1159,7 @@ impl Drop for IosWindow {
             (*self.view).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
             (*self.view_controller).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
             (*self.display_link_target).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
-            
+
             // Release display_link_target to balance the alloc+init in new().
             // The display link's strong reference was already released by invalidate above.
             let _: () = msg_send![self.display_link_target, release];

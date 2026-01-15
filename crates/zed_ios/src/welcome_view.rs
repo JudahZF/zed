@@ -2,9 +2,9 @@
 //!
 //! This is a placeholder that will be replaced with the connection UI in Phase 3.
 
-use gpui::{
-    div, px, rgb, rgba, prelude::*, Context, IntoElement, Render, SharedString, Window,
-};
+#![allow(dead_code)]
+
+use gpui::{div, prelude::*, px, rgb, rgba, Context, IntoElement, Render, SharedString, Window};
 
 pub struct WelcomeView {
     title: SharedString,
@@ -30,19 +30,24 @@ impl Default for WelcomeView {
 impl Render for WelcomeView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Use explicit colors that will definitely be visible
-        let bg_color = rgb(0x1e1e2e);        // Dark background
-        let accent_color = rgb(0x89b4fa);    // Blue accent
-        let text_color = rgb(0xcdd6f4);      // Light text
-        let muted_color = rgb(0xa6adc8);     // Muted text
-        let surface_color = rgb(0x313244);   // Surface color
-        let button_color = rgb(0x45475a);    // Button background
-        let button_hover = rgb(0x585b70);    // Button hover
+        let bg_color = rgb(0x1e1e2e); // Dark background
+        let accent_color = rgb(0x89b4fa); // Blue accent
+        let text_color = rgb(0xcdd6f4); // Light text
+        let muted_color = rgb(0xa6adc8); // Muted text
+        let surface_color = rgb(0x313244); // Surface color
+        let button_color = rgb(0x45475a); // Button background
+        let button_hover = rgb(0x585b70); // Button hover
 
         // Format tap count for display
         let tap_text: SharedString = if self.tap_count == 0 {
             "Tap to test input".into()
         } else {
-            format!("Tapped {} time{}", self.tap_count, if self.tap_count == 1 { "" } else { "s" }).into()
+            format!(
+                "Tapped {} time{}",
+                self.tap_count,
+                if self.tap_count == 1 { "" } else { "s" }
+            )
+            .into()
         };
 
         div()
@@ -101,7 +106,6 @@ impl Render for WelcomeView {
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.tap_count += 1;
-                        eprintln!("[Zed] Button tapped! Count: {}", this.tap_count);
                         cx.notify();
                     }))
                     .child(
