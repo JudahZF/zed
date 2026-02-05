@@ -1155,6 +1155,7 @@ struct DispatchingKeystrokes {
 /// that can be used to register a global action to be triggered from any place in the window.
 pub struct Workspace {
     weak_self: WeakEntity<Self>,
+    registered_window_handle: Option<WindowHandle<Workspace>>,
     workspace_actions: Vec<Box<dyn Fn(Div, &Workspace, &mut Window, &mut Context<Self>) -> Div>>,
     zoomed: Option<AnyWeakView>,
     previous_dock_drag_coordinates: Option<Point<Pixels>>,
@@ -1434,9 +1435,20 @@ impl Workspace {
 
         cx.emit(Event::PaneAdded(center_pane.clone()));
 
-        let window_handle = window.window_handle().downcast::<Workspace>().unwrap();
-        app_state.workspace_store.update(cx, |store, _| {
-            store.workspaces.insert(window_handle);
+        // Defer workspace store registration until after the window root is set.
+        // During Workspace::new, the window root hasn't been established yet,
+        // so downcast::<Workspace>() would return None.
+        let workspace_store = app_state.workspace_store.clone();
+        cx.defer_in(window, move |this, window, cx| {
+            if let Some(window_handle) = window.window_handle().downcast::<Workspace>() {
+                log::info!("[Workspace] Deferred registration: window handle obtained");
+                this.registered_window_handle = Some(window_handle);
+                workspace_store.update(cx, |store, _| {
+                    store.workspaces.insert(window_handle);
+                });
+            } else {
+                log::warn!("[Workspace] Deferred registration: window handle downcast failed");
+            }
         });
 
         let mut current_user = app_state.user_store.read(cx).watch_current_user();
@@ -1561,10 +1573,12 @@ impl Workspace {
                 GlobalTheme::reload_theme(cx);
                 GlobalTheme::reload_icon_theme(cx);
             }),
-            cx.on_release(move |this, cx| {
-                this.app_state.workspace_store.update(cx, move |store, _| {
-                    store.workspaces.remove(&window_handle);
-                })
+            cx.on_release(|this, cx| {
+                if let Some(window_handle) = this.registered_window_handle {
+                    this.app_state.workspace_store.update(cx, move |store, _| {
+                        store.workspaces.remove(&window_handle);
+                    });
+                }
             }),
         ];
 
@@ -1579,6 +1593,7 @@ impl Workspace {
 
         Workspace {
             weak_self: weak_handle.clone(),
+            registered_window_handle: None,
             zoomed: None,
             zoomed_position: None,
             previous_dock_drag_coordinates: None,
