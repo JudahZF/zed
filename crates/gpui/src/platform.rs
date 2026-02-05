@@ -2,6 +2,9 @@ mod app_menu;
 mod keyboard;
 mod keystroke;
 
+#[cfg(target_os = "ios")]
+mod ios;
+
 #[cfg(all(target_os = "linux", feature = "wayland"))]
 #[expect(missing_docs)]
 pub mod layer_shell;
@@ -69,6 +72,8 @@ pub use app_menu::*;
 pub use keyboard::*;
 pub use keystroke::*;
 
+#[cfg(target_os = "ios")]
+pub(crate) use ios::*;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use test::*;
 

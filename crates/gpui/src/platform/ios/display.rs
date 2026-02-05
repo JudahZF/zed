@@ -65,7 +65,11 @@ impl PlatformDisplay for IosDisplay {
         // iOS doesn't have a direct equivalent to CGDirectDisplayID,
         // so we use a hash of the screen pointer as an identifier.
         // This is stable for the lifetime of the app.
-        DisplayId(self.screen as u32)
+        // Use lower bits of pointer hash to avoid truncation issues
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (self.screen as usize).hash(&mut hasher);
+        DisplayId(hasher.finish() as u32)
     }
 
     fn uuid(&self) -> Result<Uuid> {
@@ -90,11 +94,12 @@ impl PlatformDisplay for IosDisplay {
 
     fn bounds(&self) -> Bounds<Pixels> {
         let bounds = self.bounds_in_points();
+        let scale = self.scale() as f32;
         Bounds {
             origin: Default::default(),
             size: size(
-                px(bounds.size.width as f32),
-                px(bounds.size.height as f32),
+                px(bounds.size.width as f32 * scale),
+                px(bounds.size.height as f32 * scale),
             ),
         }
     }

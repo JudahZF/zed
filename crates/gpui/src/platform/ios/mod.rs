@@ -1,7 +1,7 @@
 //! iOS platform implementation for GPUI.
 //!
 //! This module provides the iOS-specific platform layer, enabling GPUI to run on iPadOS.
-//! It leverages the existing Metal renderer (shared with macOS) and provides UIKit integration
+//! It leverages the existing Metal renderer and provides UIKit integration
 //! for window management, input handling, and system services.
 //!
 //! Key differences from macOS:
@@ -17,22 +17,21 @@ mod events;
 mod platform;
 mod window;
 
-// Reuse the Metal renderer from macOS - it works on iOS with conditional compilation
+// iOS-specific Metal renderer (adapted from macOS, no core_video dependency)
+pub mod metal_renderer;
+
+// metal_atlas has no cocoa dependencies, can be shared via #[path]
 #[path = "../mac/metal_atlas.rs"]
 mod metal_atlas;
-#[path = "../mac/metal_renderer.rs"]
-pub mod metal_renderer;
 
 use metal_renderer as renderer;
 
-// Reuse open_type module for font features (shared with macOS)
+// iOS-specific open_type module (adapted from macOS, local CGFloat)
 #[cfg(feature = "font-kit")]
-#[path = "../mac/open_type.rs"]
 mod open_type;
 
-// Reuse the text system from macOS - Core Text is identical on iOS
+// iOS-specific text system (adapted from macOS, local CGFloat, geometry::CGPoint)
 #[cfg(feature = "font-kit")]
-#[path = "../mac/text_system.rs"]
 mod text_system;
 
 use crate::{DevicePixels, Pixels, Size, px, size};

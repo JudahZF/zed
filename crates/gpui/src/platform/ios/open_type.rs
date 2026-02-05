@@ -1,6 +1,16 @@
+//! iOS-specific OpenType font feature handling.
+//!
+//! This is a copy of the macOS open_type module with iOS-specific adaptations:
+//! - CGFloat is defined locally instead of imported from cocoa
+
 #![allow(unused, non_upper_case_globals)]
 
-use cocoa::appkit::CGFloat;
+use crate::{FontFallbacks, FontFeatures};
+
+// CGFloat type - defined locally for iOS (always f64 on 64-bit)
+#[allow(non_camel_case_types)]
+type CGFloat = f64;
+
 use core_foundation::{
     array::{
         CFArray, CFArrayAppendArray, CFArrayAppendValue, CFArrayCreateMutable, CFArrayGetCount,
@@ -14,7 +24,7 @@ use core_foundation::{
     string::{CFString, CFStringRef},
 };
 use core_foundation_sys::locale::CFLocaleCopyPreferredLanguages;
-use core_graphics::{display::CFDictionary, geometry::CGAffineTransform};
+use core_graphics::geometry::CGAffineTransform;
 use core_text::{
     font::{CTFont, CTFontRef, cascade_list_for_languages},
     font_descriptor::{
@@ -24,7 +34,6 @@ use core_text::{
     },
 };
 use font_kit::font::Font as FontKitFont;
-use gpui::{FontFallbacks, FontFeatures};
 use std::ptr;
 
 pub fn apply_features_and_fallbacks(
