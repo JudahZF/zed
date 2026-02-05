@@ -14,13 +14,16 @@ use objc::{
 };
 use std::{
     ffi::c_void,
-    ptr::NonNull,
+    ptr::{NonNull, addr_of},
     time::{Duration, Instant},
 };
 
 // GCD type definitions - these are the same on iOS and macOS
+#[allow(non_camel_case_types)]
 type dispatch_queue_t = *mut c_void;
+#[allow(non_camel_case_types)]
 type dispatch_time_t = u64;
+#[allow(non_camel_case_types)]
 type dispatch_function_t = Option<unsafe extern "C" fn(*mut c_void)>;
 
 const DISPATCH_TIME_NOW: u64 = 0;
@@ -30,7 +33,9 @@ const DISPATCH_QUEUE_PRIORITY_LOW: isize = -2;
 
 #[link(name = "System", kind = "dylib")]
 unsafe extern "C" {
-    fn dispatch_get_main_queue() -> dispatch_queue_t;
+    // Global variable for the main queue - not a function
+    static _dispatch_main_q: c_void;
+
     fn dispatch_get_global_queue(identifier: isize, flags: usize) -> dispatch_queue_t;
     fn dispatch_async_f(queue: dispatch_queue_t, context: *mut c_void, work: dispatch_function_t);
     fn dispatch_after_f(
@@ -42,6 +47,11 @@ unsafe extern "C" {
     fn dispatch_time(when: dispatch_time_t, delta: i64) -> dispatch_time_t;
 }
 
+/// Get the main dispatch queue.
+/// On iOS/macOS, dispatch_get_main_queue() is a macro that accesses _dispatch_main_q.
+fn dispatch_get_main_queue() -> dispatch_queue_t {
+    unsafe { addr_of!(_dispatch_main_q) as dispatch_queue_t }
+}
 pub(crate) struct IosDispatcher;
 
 impl Default for IosDispatcher {

@@ -5,8 +5,12 @@
 //! with the Metal renderer shared with macOS.
 
 use super::{
-    events::{translate_key_press, translate_pan_to_scroll, translate_touch_to_mouse},
-    metal_renderer::MetalRenderer, BoolExt, CGPoint, CGRect, CGSize, UIEdgeInsets,
+    BoolExt, CGPoint, CGRect, CGSize, UIEdgeInsets,
+    events::{
+        UIKeyModifierFlags, ios_keyboard_log, translate_key_press, translate_modifiers_changed,
+        translate_pan_to_scroll, translate_touch_to_mouse,
+    },
+    metal_renderer::MetalRenderer,
 };
 use super::metal_atlas::MetalAtlas;
 use crate::{
@@ -35,13 +39,17 @@ use std::{
     ptr,
     ptr::NonNull,
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, Weak},
 };
 
 use super::IosDisplay;
 use super::metal_renderer::InstanceBufferPool;
 
 const WINDOW_STATE_IVAR: &str = "windowState";
+
+unsafe extern "C" {
+    static NSRunLoopCommonModes: *mut Object;
+}
 
 static VIEW_CLASS: OnceLock<&'static Class> = OnceLock::new();
 static VIEW_CONTROLLER_CLASS: OnceLock<&'static Class> = OnceLock::new();
@@ -107,6 +115,23 @@ unsafe fn register_view_class() -> &'static Class {
         can_become_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
     );
 
+    // UIKeyInput protocol for software keyboard support
+    if let Some(protocol) = Protocol::get("UIKeyInput") {
+        decl.add_protocol(protocol);
+    }
+    decl.add_method(
+        sel!(insertText:),
+        insert_text as extern "C" fn(&Object, Sel, *mut Object),
+    );
+    decl.add_method(
+        sel!(deleteBackward),
+        delete_backward as extern "C" fn(&Object, Sel),
+    );
+    decl.add_method(
+        sel!(hasText),
+        has_text as extern "C" fn(&Object, Sel) -> BOOL,
+    );
+
     // Layout
     decl.add_method(
         sel!(layoutSubviews),
@@ -156,7 +181,10 @@ unsafe fn register_view_controller_class() -> &'static Class {
 // Objective-C callback implementations
 
 extern "C" fn layer_class(_this: &Class, _sel: Sel) -> *const Class {
-    class!(CAMetalLayer)
+    // Return regular CALayer as the view's layer class. The Metal renderer's
+    // CAMetalLayer is added as a sublayer instead of making the view's root
+    // layer itself a CAMetalLayer.
+    class!(CALayer)
 }
 
 extern "C" fn can_become_first_responder(_this: &Object, _sel: Sel) -> BOOL {
@@ -181,11 +209,9 @@ extern "C" fn touches_cancelled(this: &Object, _sel: Sel, touches: *mut Object, 
 
 fn handle_touches(view: &Object, touches: *mut Object, _phase: &str) {
     unsafe {
-        let state = get_window_state(view);
-        if state.is_null() {
+        let Some(state) = get_window_state(view) else {
             return;
-        }
-        let state = &*state;
+        };
 
         let count: usize = msg_send![touches, count];
         let all_objects: *mut Object = msg_send![touches, allObjects];
@@ -205,48 +231,235 @@ fn handle_touches(view: &Object, touches: *mut Object, _phase: &str) {
 }
 
 extern "C" fn presses_began(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
-    handle_presses(this, presses, true);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Use minimal handler for debugging
+        handle_presses(this, presses, true);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_began: {:?}", e);
+    }
 }
 
 extern "C" fn presses_ended(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
-    handle_presses(this, presses, false);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Use minimal handler for debugging
+        handle_presses(this, presses, false);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_ended: {:?}", e);
+    }
 }
 
 extern "C" fn presses_changed(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
     // Changed is used for pressure-sensitive keys, treat as key down
-    handle_presses(this, presses, true);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_presses(this, presses, true);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_changed: {:?}", e);
+    }
 }
 
-extern "C" fn presses_cancelled(this: &Object, _sel: Sel, presses: *mut Object, _event: *mut Object) {
-    handle_presses(this, presses, false);
+extern "C" fn presses_cancelled(
+    this: &Object,
+    _sel: Sel,
+    presses: *mut Object,
+    _event: *mut Object,
+) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_presses(this, presses, false);
+    }));
+    if let Err(e) = result {
+        log::error!("Panic in presses_cancelled: {:?}", e);
+    }
 }
 
 fn handle_presses(view: &Object, presses: *mut Object, is_key_down: bool) {
     unsafe {
-        let state = get_window_state(view);
-        if state.is_null() {
+        // Early null check for presses
+        if presses.is_null() {
+            ios_keyboard_log("handle_presses: presses is null, returning early");
             return;
         }
-        let state = &*state;
+
+        let Some(state) = get_window_state(view) else {
+            ios_keyboard_log("handle_presses: could not get window state");
+            return;
+        };
 
         let count: usize = msg_send![presses, count];
+        ios_keyboard_log(&format!(
+            "handle_presses: count={}, is_key_down={}",
+            count, is_key_down
+        ));
+
+        if count == 0 {
+            return;
+        }
+
         let all_objects: *mut Object = msg_send![presses, allObjects];
+        if all_objects.is_null() {
+            ios_keyboard_log("handle_presses: allObjects is null");
+            return;
+        }
 
         for i in 0..count {
             let press: *mut Object = msg_send![all_objects, objectAtIndex: i];
+            if press.is_null() {
+                ios_keyboard_log(&format!("handle_presses: press {} is null, skipping", i));
+                continue;
+            }
+            ios_keyboard_log(&format!("Processing press {}/{}", i + 1, count));
 
-            // Check if this is a repeat
+            // Check if this is a repeat - key may be null for non-keyboard presses
             let key: *mut Object = msg_send![press, key];
             let is_repeat: bool = if !key.is_null() {
                 msg_send![press, isRepeating]
             } else {
+                ios_keyboard_log("handle_presses: key is null (not a keyboard press?)");
                 false
             };
 
+            // Skip non-keyboard presses entirely
+            if key.is_null() {
+                ios_keyboard_log("handle_presses: skipping non-keyboard press");
+                continue;
+            }
+
+            // Update modifier state from hardware keyboard and dispatch ModifiersChangedEvent if changed
+            let modifier_flags: i64 = msg_send![key, modifierFlags];
+            let new_modifiers = UIKeyModifierFlags(modifier_flags).to_modifiers();
+            let old_modifiers = state.modifiers.lock().clone();
+            if new_modifiers != old_modifiers {
+                *state.modifiers.lock() = new_modifiers;
+                let modifiers_event = translate_modifiers_changed(modifier_flags);
+                dispatch_event(&state, modifiers_event);
+            }
+
+            // Translate the key press - this should not panic now with all the null checks
             if let Some(event) = translate_key_press(press, is_key_down, is_repeat) {
+                ios_keyboard_log(&format!("Dispatching key event for press {}", i + 1));
                 dispatch_event(&state, event);
+            } else {
+                ios_keyboard_log(&format!("No event generated for press {}", i + 1));
             }
         }
+    }
+}
+
+extern "C" fn insert_text(this: &Object, _sel: Sel, text: *mut Object) {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        if text.is_null() {
+            return;
+        }
+
+        let c_str: *const i8 = msg_send![text, UTF8String];
+        if c_str.is_null() {
+            return;
+        }
+
+        let text_str = match std::ffi::CStr::from_ptr(c_str).to_str() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        if text_str.is_empty() {
+            return;
+        }
+
+        // First try to use the input handler if one is registered
+        let handled = with_input_handler(&state, |input_handler| {
+            input_handler.replace_text_in_range(None, text_str);
+        })
+        .is_some();
+
+        // If no input handler, dispatch as a KeyDown event with key_char
+        // so that elements using on_key_down can receive it
+        if !handled {
+            let keystroke = crate::Keystroke {
+                key: text_str.into(),
+                modifiers: Modifiers::default(),
+                key_char: Some(text_str.to_string()),
+            };
+
+            let event = PlatformInput::KeyDown(crate::KeyDownEvent {
+                keystroke,
+                is_held: false,
+                prefer_character_input: true,
+            });
+
+            dispatch_event(&state, event);
+        }
+    }
+}
+
+extern "C" fn delete_backward(this: &Object, _sel: Sel) {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        let keystroke = crate::Keystroke {
+            key: "backspace".into(),
+            modifiers: Modifiers::default(),
+            key_char: None,
+        };
+
+        let event = PlatformInput::KeyDown(crate::KeyDownEvent {
+            keystroke,
+            is_held: false,
+            prefer_character_input: false,
+        });
+
+        dispatch_event(&state, event);
+    }
+}
+
+extern "C" fn has_text(this: &Object, _sel: Sel) -> BOOL {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return NO;
+        };
+
+        let has = with_input_handler(&state, |input_handler| {
+            // Check if there's a selection with text, or if cursor is past position 0
+            if let Some(sel) = input_handler.selected_text_range(false) {
+                if sel.range.len() > 0 || sel.range.start > 0 {
+                    return true;
+                }
+            }
+
+            // Cursor might be at position 0, but document could still have text.
+            // Check if there's any text in the document by requesting text from the start.
+            let mut adjusted = None;
+            input_handler
+                .text_for_range(0..1, &mut adjusted)
+                .is_some_and(|text| !text.is_empty())
+        })
+        .unwrap_or(false);
+
+        if has { YES } else { NO }
+    }
+}
+
+fn with_input_handler<F, R>(state: &WindowState, f: F) -> Option<R>
+where
+    F: FnOnce(&mut crate::platform::PlatformInputHandler) -> R,
+{
+    let mut input_handler = state.input_handler.lock().take()?;
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut input_handler)));
+
+    // Always restore the input handler, even if f panicked
+    *state.input_handler.lock() = Some(input_handler);
+
+    match result {
+        Ok(value) => Some(value),
+        Err(panic) => std::panic::resume_unwind(panic),
     }
 }
 
@@ -256,23 +469,29 @@ extern "C" fn layout_subviews(this: &Object, _sel: Sel) {
         let superclass = class!(UIView);
         let _: () = msg_send![super(this, superclass), layoutSubviews];
 
-        let state = get_window_state(this);
-        if state.is_null() {
+        let Some(state) = get_window_state(this) else {
             return;
-        }
-        let state = &*state;
+        };
 
-        // Update Metal layer size
+        // Update Metal layer size - we need to update the renderer's layer, not the view's layer
         let bounds: CGRect = msg_send![this, bounds];
         let scale: f64 = msg_send![this, contentScaleFactor];
 
-        let layer: *mut Object = msg_send![this, layer];
-        let drawable_size = CGSize {
-            width: bounds.size.width * scale,
-            height: bounds.size.height * scale,
-        };
-        let _: () = msg_send![layer, setDrawableSize: drawable_size];
-        let _: () = msg_send![layer, setContentsScale: scale];
+        // Update renderer's layer frame and drawable size
+        {
+            let renderer = state.renderer.lock();
+            let renderer_layer = renderer.layer_ptr();
+            let _: () = msg_send![renderer_layer, setFrame: bounds];
+            let _: () = msg_send![renderer_layer, setContentsScale: scale];
+            let drawable_size = CGSize {
+                width: bounds.size.width * scale,
+                height: bounds.size.height * scale,
+            };
+            let _: () = msg_send![renderer_layer, setDrawableSize: drawable_size];
+        }
+
+        // Update scale factor in state
+        *state.scale_factor.lock() = scale as f32;
 
         // Notify of resize
         if let Some(callback) = state.resize_callback.lock().as_mut() {
@@ -286,11 +505,9 @@ extern "C" fn layout_subviews(this: &Object, _sel: Sel) {
 
 extern "C" fn display_layer(this: &Object, _sel: Sel, _layer: *mut Object) {
     unsafe {
-        let state = get_window_state(this);
-        if state.is_null() {
+        let Some(state) = get_window_state(this) else {
             return;
-        }
-        let state = &*state;
+        };
 
         if let Some(callback) = state.request_frame_callback.lock().as_mut() {
             callback(RequestFrameOptions {
@@ -321,16 +538,16 @@ extern "C" fn view_will_transition(
         let _: () = msg_send![super(this, superclass), viewWillTransitionToSize: new_size withTransitionCoordinator: coordinator];
 
         // Handle rotation/resize
-        let state_ptr: *mut c_void = *this.get_ivar(WINDOW_STATE_IVAR);
-        if !state_ptr.is_null() {
-            let state = &*(state_ptr as *const WindowState);
-            if let Some(callback) = state.resize_callback.lock().as_mut() {
-                let scale = state.scale_factor.lock().clone();
-                callback(
-                    size(px(new_size.width as f32), px(new_size.height as f32)),
-                    scale,
-                );
-            }
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        if let Some(callback) = state.resize_callback.lock().as_mut() {
+            let scale = *state.scale_factor.lock();
+            callback(
+                size(px(new_size.width as f32), px(new_size.height as f32)),
+                scale,
+            );
         }
     }
 }
@@ -341,7 +558,24 @@ extern "C" fn safe_area_insets_did_change(this: &Object, _sel: Sel) {
         let superclass = class!(UIViewController);
         let _: () = msg_send![super(this, superclass), viewSafeAreaInsetsDidChange];
 
-        // Could notify about safe area changes here
+        // Notify about safe area changes by treating them as a layout/resize event.
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        if let Some(callback) = state.resize_callback.lock().as_mut() {
+            // Obtain the current view size in points and convert to pixels.
+            let view: *mut Object = msg_send![this, view];
+            if !view.is_null() {
+                let bounds: CGRect = msg_send![view, bounds];
+                let bounds_size = bounds.size;
+                let scale = *state.scale_factor.lock();
+                callback(
+                    size(px(bounds_size.width as f32), px(bounds_size.height as f32)),
+                    scale,
+                );
+            }
+        }
     }
 }
 
@@ -351,26 +585,34 @@ extern "C" fn trait_collection_did_change(this: &Object, _sel: Sel, previous: *m
         let superclass = class!(UIViewController);
         let _: () = msg_send![super(this, superclass), traitCollectionDidChange: previous];
 
-        let state_ptr: *mut c_void = *this.get_ivar(WINDOW_STATE_IVAR);
-        if !state_ptr.is_null() {
-            let state = &*(state_ptr as *const WindowState);
-            if let Some(callback) = state.appearance_changed_callback.lock().as_mut() {
-                callback();
-            }
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        if let Some(callback) = state.appearance_changed_callback.lock().as_mut() {
+            callback();
         }
     }
 }
 
-unsafe fn get_window_state(view: &Object) -> *const WindowState {
-    // SAFETY: The view was created with WINDOW_STATE_IVAR set to a valid WindowState pointer
-    // or null. Callers check for null before dereferencing.
-    let state_ptr: *mut c_void = unsafe { *view.get_ivar(WINDOW_STATE_IVAR) };
-    state_ptr as *const WindowState
+unsafe fn get_window_state(obj: &Object) -> Option<Arc<WindowState>> {
+    let weak_ptr: *mut c_void = *obj.get_ivar(WINDOW_STATE_IVAR);
+    if weak_ptr.is_null() {
+        return None;
+    }
+
+    let weak = &*(weak_ptr as *const Weak<WindowState>);
+    weak.upgrade()
 }
 
 fn dispatch_event(state: &WindowState, event: PlatformInput) {
     if let Some(callback) = state.input_callback.lock().as_mut() {
-        callback(event);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            callback(event);
+        }));
+        if let Err(e) = result {
+            log::error!("Panic in dispatch_event: {:?}", e);
+        }
     }
 }
 
@@ -391,6 +633,7 @@ struct WindowState {
     input_handler: Mutex<Option<PlatformInputHandler>>,
     modifiers: Mutex<Modifiers>,
     scale_factor: Mutex<f32>,
+    display_link: Mutex<Option<*mut Object>>,
 }
 
 /// iOS window implementation.
@@ -399,6 +642,45 @@ pub struct IosWindow {
     view: *mut Object,
     view_controller: *mut Object,
     state: Arc<WindowState>,
+    view_weak: Box<Weak<WindowState>>,
+    view_controller_weak: Box<Weak<WindowState>>,
+    display_link_target: *mut Object,
+    display_link_target_weak: Box<Weak<WindowState>>,
+}
+
+static DISPLAY_LINK_TARGET_CLASS: OnceLock<&'static Class> = OnceLock::new();
+
+fn ensure_display_link_class_registered() {
+    DISPLAY_LINK_TARGET_CLASS.get_or_init(|| unsafe { register_display_link_target_class() });
+}
+
+unsafe fn register_display_link_target_class() -> &'static Class {
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("GPUIDisplayLinkTarget", superclass).unwrap();
+
+    decl.add_ivar::<*mut c_void>(WINDOW_STATE_IVAR);
+
+    decl.add_method(
+        sel!(step:),
+        display_link_step as extern "C" fn(&Object, Sel, *mut Object),
+    );
+
+    decl.register()
+}
+
+extern "C" fn display_link_step(this: &Object, _sel: Sel, _display_link: *mut Object) {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        if let Some(callback) = state.request_frame_callback.lock().as_mut() {
+            callback(RequestFrameOptions {
+                require_presentation: true,
+                force_render: false,
+            });
+        }
+    }
 }
 
 unsafe impl Send for IosWindow {}
@@ -410,6 +692,7 @@ impl IosWindow {
         renderer_context: Arc<Mutex<InstanceBufferPool>>,
     ) -> anyhow::Result<Self> {
         ensure_classes_registered();
+        ensure_display_link_class_registered();
 
         unsafe {
             // Get the main screen
@@ -431,21 +714,23 @@ impl IosWindow {
             let view: *mut Object = msg_send![view_class, alloc];
             let view: *mut Object = msg_send![view, initWithFrame: screen_bounds];
 
-            // Create the renderer - this creates its own CAMetalLayer
             let renderer = MetalRenderer::new(renderer_context);
+            let view_layer: *mut Object = msg_send![view, layer];
+            let renderer_layer = renderer.layer_ptr();
 
-            // Get the Metal layer from the renderer and set it as the view's layer
-            let metal_layer = renderer.layer_ptr();
-            let _: () = msg_send![view, setLayer: metal_layer];
+            let clear_color: *mut Object = msg_send![class!(UIColor), clearColor];
+            let _: () = msg_send![view, setBackgroundColor: clear_color];
+            let _: () = msg_send![view_layer, setBackgroundColor: std::ptr::null::<c_void>()];
 
-            // Configure the layer scale
-            let layer: *mut Object = msg_send![view, layer];
-            let _: () = msg_send![layer, setContentsScale: scale];
+            let _: () = msg_send![view_layer, addSublayer: renderer_layer];
+
+            let _: () = msg_send![renderer_layer, setFrame: screen_bounds];
+            let _: () = msg_send![renderer_layer, setContentsScale: scale];
             let drawable_size = CGSize {
                 width: screen_bounds.size.width * scale,
                 height: screen_bounds.size.height * scale,
             };
-            let _: () = msg_send![layer, setDrawableSize: drawable_size];
+            let _: () = msg_send![renderer_layer, setDrawableSize: drawable_size];
 
             // Create the window state
             let state = Arc::new(WindowState {
@@ -464,16 +749,37 @@ impl IosWindow {
                 input_handler: Mutex::new(None),
                 modifiers: Mutex::new(Modifiers::default()),
                 scale_factor: Mutex::new(scale as f32),
+                display_link: Mutex::new(None),
             });
 
-            // Store state pointer in Objective-C objects
-            let state_ptr = Arc::as_ptr(&state) as *mut c_void;
-            (*view).set_ivar(WINDOW_STATE_IVAR, state_ptr);
-            (*view_controller).set_ivar(WINDOW_STATE_IVAR, state_ptr);
-            
-            // Keep the Arc alive - increment for each ivar that holds the pointer
-            Arc::increment_strong_count(Arc::as_ptr(&state));
-            Arc::increment_strong_count(Arc::as_ptr(&state));
+            let view_weak = Box::new(Arc::downgrade(&state));
+            let view_controller_weak = Box::new(Arc::downgrade(&state));
+            let display_link_target_weak = Box::new(Arc::downgrade(&state));
+
+            let view_weak_ptr = view_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
+            (*view).set_ivar(WINDOW_STATE_IVAR, view_weak_ptr);
+            let vc_weak_ptr =
+                view_controller_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
+            (*view_controller).set_ivar(WINDOW_STATE_IVAR, vc_weak_ptr);
+
+            let display_link_target_class = *DISPLAY_LINK_TARGET_CLASS.get().unwrap();
+            let display_link_target: *mut Object = msg_send![display_link_target_class, alloc];
+            let display_link_target: *mut Object = msg_send![display_link_target, init];
+            let dl_weak_ptr =
+                display_link_target_weak.as_ref() as *const Weak<WindowState> as *mut c_void;
+            (*display_link_target).set_ivar(WINDOW_STATE_IVAR, dl_weak_ptr);
+
+            let display_link: *mut Object = msg_send![
+                class!(CADisplayLink),
+                displayLinkWithTarget: display_link_target
+                selector: sel!(step:)
+            ];
+
+            let run_loop: *mut Object = msg_send![class!(NSRunLoop), mainRunLoop];
+            let _: () =
+                msg_send![display_link, addToRunLoop: run_loop forMode: NSRunLoopCommonModes];
+
+            *state.display_link.lock() = Some(display_link);
             // Set up the view hierarchy
             let _: () = msg_send![view_controller, setView: view];
             let _: () = msg_send![ui_window, setRootViewController: view_controller];
@@ -484,11 +790,19 @@ impl IosWindow {
             // Make the window visible
             let _: () = msg_send![ui_window, makeKeyAndVisible];
 
+            // Request initial display - this ensures the layer gets drawn
+            let _: () = msg_send![view, setNeedsDisplay];
+            let _: () = msg_send![renderer_layer, setNeedsDisplay];
+
             Ok(Self {
                 ui_window,
                 view,
                 view_controller,
                 state,
+                view_weak,
+                view_controller_weak,
+                display_link_target,
+                display_link_target_weak,
             })
         }
     }
@@ -708,17 +1022,20 @@ impl PlatformWindow for IosWindow {
 impl Drop for IosWindow {
     fn drop(&mut self) {
         unsafe {
-            // Clear the state pointers
+            if let Some(display_link) = self.state.display_link.lock().take() {
+                let _: () = msg_send![display_link, invalidate];
+            }
+
             (*self.view).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
             (*self.view_controller).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
+            (*self.display_link_target).set_ivar(WINDOW_STATE_IVAR, ptr::null_mut::<c_void>());
+
+            let _: () = msg_send![self.display_link_target, release];
 
             // Call any close callback
             if let Some(callback) = self.state.close_callback.lock().take() {
                 callback();
             }
-
-            // Decrement the Arc strong count that we incremented in new()
-            Arc::decrement_strong_count(Arc::as_ptr(&self.state));
 
             // Hide the window
             let _: () = msg_send![self.ui_window, setHidden: YES];

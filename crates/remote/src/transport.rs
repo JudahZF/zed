@@ -20,9 +20,12 @@ pub mod mock;
 pub mod ssh;
 pub mod wsl;
 
+#[cfg(target_os = "ios")]
+pub mod russh_ssh;
+
 /// Parses the output of `uname -sm` to determine the remote platform.
 /// Takes the last line to skip possible shell initialization output.
-fn parse_platform(output: &str) -> Result<RemotePlatform> {
+pub(crate) fn parse_platform(output: &str) -> Result<RemotePlatform> {
     let output = output.trim();
     let uname = output.rsplit_once('\n').map_or(output, |(_, last)| last);
     let Some((os, arch)) = uname.split_once(" ") else {
@@ -57,7 +60,7 @@ fn parse_platform(output: &str) -> Result<RemotePlatform> {
 
 /// Parses the output of `echo $SHELL` to determine the remote shell.
 /// Takes the last line to skip possible shell initialization output.
-fn parse_shell(output: &str, fallback_shell: &str) -> String {
+pub(crate) fn parse_shell(output: &str, fallback_shell: &str) -> String {
     let output = output.trim();
     let shell = output.rsplit_once('\n').map_or(output, |(_, last)| last);
     if shell.is_empty() {

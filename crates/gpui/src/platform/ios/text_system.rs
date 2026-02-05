@@ -1,8 +1,25 @@
 //! iOS-specific text system.
 //!
-//! This is a copy of the macOS text system with iOS-specific adaptations:
+//! This is adapted from the macOS text system with iOS-specific modifications:
 //! - CGFloat is defined locally instead of imported from cocoa
 //! - CGPoint is imported from core_graphics::geometry (iOS-compatible path)
+//! - Font name mapping handles iOS system font names
+//!
+//! # Font Requirements
+//!
+//! Since iOS doesn't have the same system fonts as macOS, this text system maps
+//! special font names to embedded fallback fonts:
+//!
+//! - `.SystemUIFont` / `.AppleSystemUIFont` → `"IBM Plex Sans"`
+//! - `.ZedSans` / `Zed Plex Sans` → `"IBM Plex Sans"`
+//! - `.ZedMono` / `Zed Plex Mono` → `"Lilex"`
+//!
+//! These fonts MUST be loaded via `add_fonts()` before any text rendering occurs.
+//! The fonts are bundled in `assets/fonts/` and should be loaded during app
+//! initialization using `Assets::load_fonts()`.
+//!
+//! If these fonts are not available, text rendering will fail with an error
+//! indicating which font could not be found.
 
 use crate::{
     Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun,
@@ -79,6 +96,10 @@ struct MacTextSystemState {
     postscript_names_by_font_id: HashMap<FontId, String>,
 }
 
+/// Font families that must be available for iOS text rendering.
+/// These are used as fallbacks for system font names that don't exist on iOS.
+pub const REQUIRED_FALLBACK_FONTS: &[&str] = &["IBM Plex Sans", "Lilex"];
+
 impl MacTextSystem {
     pub(crate) fn new() -> Self {
         Self(RwLock::new(MacTextSystemState {
@@ -90,6 +111,43 @@ impl MacTextSystem {
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
         }))
+    }
+
+    /// Verify that required fallback fonts are available.
+    ///
+    /// On iOS, system fonts like `.SystemUIFont` are mapped to embedded fonts
+    /// (IBM Plex Sans and Lilex). This method checks that these fonts have been
+    /// loaded and are available for use.
+    ///
+    /// Returns `Ok(())` if all required fonts are available, or an error listing
+    /// which fonts are missing.
+    pub fn verify_required_fonts(&self) -> Result<()> {
+        let state = self.0.read();
+        let mut missing_fonts = Vec::new();
+
+        for font_name in REQUIRED_FALLBACK_FONTS {
+            let is_available = state
+                .memory_source
+                .select_family_by_name(font_name)
+                .or_else(|_| state.system_source.select_family_by_name(font_name))
+                .is_ok();
+
+            if !is_available {
+                missing_fonts.push(*font_name);
+            }
+        }
+
+        if missing_fonts.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "Required fallback fonts not available on iOS: {}. \
+                These fonts must be bundled in assets/fonts/ and loaded via add_fonts() \
+                before text rendering. Without them, text using system fonts \
+                (.SystemUIFont, .ZedMono, .ZedSans) will fail to render.",
+                missing_fonts.join(", ")
+            ))
+        }
     }
 }
 
@@ -221,17 +279,36 @@ impl MacTextSystemState {
         features: &FontFeatures,
         fallbacks: Option<&FontFallbacks>,
     ) -> Result<SmallVec<[FontId; 4]>> {
-        let name = if name == ".SystemUIFont" {
-            ".AppleSystemUIFont"
-        } else {
-            name
+        // On iOS, map system font names to our embedded fonts since iOS doesn't
+        // have the same system fonts as macOS. These fallback fonts (IBM Plex Sans
+        // and Lilex) must be loaded via add_fonts() before text rendering.
+        let original_name = name;
+        let name = match name {
+            ".SystemUIFont" | ".AppleSystemUIFont" => "IBM Plex Sans",
+            ".ZedSans" | "Zed Plex Sans" => "IBM Plex Sans",
+            ".ZedMono" | "Zed Plex Mono" => "Lilex",
+            _ => name,
         };
 
         let mut font_ids = SmallVec::new();
         let family = self
             .memory_source
             .select_family_by_name(name)
-            .or_else(|_| self.system_source.select_family_by_name(name))?;
+            .or_else(|_| self.system_source.select_family_by_name(name))
+            .map_err(|e| {
+                if original_name != name {
+                    anyhow!(
+                        "Font '{}' (mapped from '{}') not found. Ensure the font is loaded via add_fonts(). \
+                        On iOS, the fonts 'IBM Plex Sans' and 'Lilex' must be bundled in assets/fonts/ \
+                        and loaded during app initialization. Original error: {}",
+                        name,
+                        original_name,
+                        e
+                    )
+                } else {
+                    e.into()
+                }
+            })?;
         for font in family.fonts() {
             let mut font = font.load()?;
 

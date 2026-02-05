@@ -9,8 +9,44 @@ use crate::{
     TouchPhase as GpuiTouchPhase, point, px,
 };
 use objc::{msg_send, runtime::Object, sel, sel_impl};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::CGPoint;
+
+/// Flag to enable verbose keyboard debugging. Set via `set_keyboard_debug_enabled()`.
+static KEYBOARD_DEBUG_ENABLED: AtomicBool = AtomicBool::new(cfg!(debug_assertions));
+
+/// Enable or disable keyboard debug logging at runtime.
+pub fn set_keyboard_debug_enabled(enabled: bool) {
+    KEYBOARD_DEBUG_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// iOS-specific debug logging for keyboard events.
+/// Writes to stderr and optionally to a log file in the temp directory.
+#[allow(unused_variables)]
+pub fn ios_keyboard_log(message: &str) {
+    if !KEYBOARD_DEBUG_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let msg = format!("[iOS Keyboard] {}", message);
+    eprintln!("{}", msg);
+
+    // Also write to a file that can be retrieved from the simulator
+    #[cfg(debug_assertions)]
+    {
+        use std::io::Write;
+        let mut log_path = std::env::temp_dir();
+        log_path.push("zed_ios_keyboard.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let _ = writeln!(file, "{}", msg);
+        }
+    }
+}
 
 /// UITouch phase constants
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,54 +180,66 @@ pub fn translate_pan_to_scroll(
 }
 
 /// Translate a UIKey press to a GPUI keyboard event.
+///
+/// This function safely extracts key information from a UIPress object,
+/// handling null pointers and invalid data gracefully.
 pub fn translate_key_press(
     press: *mut Object,
     is_key_down: bool,
     is_repeat: bool,
 ) -> Option<PlatformInput> {
     unsafe {
+        // Validate press object
+        if press.is_null() {
+            ios_keyboard_log("translate_key_press: press is null");
+            return None;
+        }
+
         let key: *mut Object = msg_send![press, key];
         if key.is_null() {
+            ios_keyboard_log("translate_key_press: press.key is null (not a keyboard event?)");
             return None;
         }
 
         let key_code: i64 = msg_send![key, keyCode];
-        let characters: *mut Object = msg_send![key, characters];
-        let modifier_flags: i64 = msg_send![key, modifierFlags];
+        ios_keyboard_log(&format!(
+            "Key event: code={} (0x{:x}), down={}, repeat={}",
+            key_code, key_code, is_key_down, is_repeat
+        ));
 
+        // Safely extract modifier flags
+        let modifier_flags: i64 = msg_send![key, modifierFlags];
         let modifiers = UIKeyModifierFlags(modifier_flags).to_modifiers();
-        
-        // Get the character string
-        let key_str = if !characters.is_null() {
-            let len: usize = msg_send![characters, length];
-            if len > 0 {
-                let c_str: *const i8 = msg_send![characters, UTF8String];
-                if !c_str.is_null() {
-                    std::ffi::CStr::from_ptr(c_str)
-                        .to_str()
-                        .ok()
-                        .map(String::from)
-                } else {
-                    None
-                }
-            } else {
-                None
+        // Safely get the character string from the key
+        let key_str = get_key_characters_safely(key);
+        if let Some(ref s) = key_str {
+            ios_keyboard_log(&format!("Key characters: '{}'", s));
+        }
+
+        // Determine the key name: use characters if available, otherwise map from code
+        let key_name = match &key_str {
+            Some(s) if !s.is_empty() && !is_special_key_code(key_code) => s.clone(),
+            _ => {
+                let mapped = key_code_to_string(key_code);
+                ios_keyboard_log(&format!("Mapped key code {} to '{}'", key_code, mapped));
+                mapped
             }
-        } else {
-            None
         };
 
-        // Derive the character (if any) from the UIKey's characters string
-        let key_char = key_str.clone();
-
-        // Map UIKeyboardHIDUsage to key string
-        let key = key_str.clone().unwrap_or_else(|| key_code_to_string(key_code));
+        // For character input, only use key_char for printable characters
+        let key_char =
+            key_str.filter(|s| !s.is_empty() && s.chars().all(|c| !c.is_control() || c == '\t'));
 
         let keystroke = Keystroke {
-            key: key.into(),
+            key: key_name.into(),
             modifiers,
             key_char,
         };
+
+        ios_keyboard_log(&format!(
+            "Created keystroke: key='{}', char={:?}, mods={:?}",
+            keystroke.key, keystroke.key_char, keystroke.modifiers
+        ));
 
         if is_key_down {
             Some(PlatformInput::KeyDown(KeyDownEvent {
@@ -203,6 +251,60 @@ pub fn translate_key_press(
             Some(PlatformInput::KeyUp(KeyUpEvent { keystroke }))
         }
     }
+}
+
+/// Safely extract the characters string from a UIKey object.
+/// Returns None if the string is null, empty, or cannot be converted to UTF-8.
+unsafe fn get_key_characters_safely(key: *mut Object) -> Option<String> {
+    if key.is_null() {
+        return None;
+    }
+
+    let characters: *mut Object = msg_send![key, characters];
+    if characters.is_null() {
+        ios_keyboard_log("get_key_characters_safely: characters is null");
+        return None;
+    }
+
+    // Check length before attempting to get UTF8String
+    let len: usize = msg_send![characters, length];
+    if len == 0 {
+        ios_keyboard_log("get_key_characters_safely: characters length is 0");
+        return None;
+    }
+
+    let c_str: *const i8 = msg_send![characters, UTF8String];
+    if c_str.is_null() {
+        ios_keyboard_log("get_key_characters_safely: UTF8String returned null");
+        return None;
+    }
+
+    match std::ffi::CStr::from_ptr(c_str).to_str() {
+        Ok(s) => Some(s.to_string()),
+        Err(e) => {
+            ios_keyboard_log(&format!("get_key_characters_safely: UTF-8 error: {}", e));
+            None
+        }
+    }
+}
+
+/// Check if a key code represents a special key that should use the mapped name
+/// rather than the characters string.
+fn is_special_key_code(key_code: i64) -> bool {
+    matches!(
+        key_code,
+        0x28 | // Enter
+        0x29 | // Escape
+        0x2A | // Backspace
+        0x2B | // Tab
+        0x2C | // Space
+        0x39 | // Caps Lock
+        0x3A..=0x45 | // F1-F12
+        0x46..=0x48 | // PrintScreen, ScrollLock, Pause
+        0x49..=0x52 | // Insert, Home, PageUp, Delete, End, PageDown, Arrows
+        0x53..=0x63 | // Keypad
+        0xE0..=0xE7   // Modifiers
+    )
 }
 
 /// Translate a modifier flags change to a modifiers changed event.
@@ -247,7 +349,7 @@ fn key_code_to_string(key_code: i64) -> String {
         0x36 => ",".to_string(),
         0x37 => ".".to_string(),
         0x38 => "/".to_string(),
-        
+        0x39 => "capslock".to_string(),
         // Function keys
         0x3A => "f1".to_string(),
         0x3B => "f2".to_string(),
@@ -261,7 +363,10 @@ fn key_code_to_string(key_code: i64) -> String {
         0x43 => "f10".to_string(),
         0x44 => "f11".to_string(),
         0x45 => "f12".to_string(),
-        
+        // System keys
+        0x46 => "printscreen".to_string(),
+        0x47 => "scrolllock".to_string(),
+        0x48 => "pause".to_string(),
         // Navigation
         0x49 => "insert".to_string(),
         0x4A => "home".to_string(),
@@ -279,11 +384,29 @@ fn key_code_to_string(key_code: i64) -> String {
         0xE1 => "shift".to_string(),
         0xE2 => "alt".to_string(),
         0xE3 => "cmd".to_string(),
-        0xE4 => "control".to_string(),  // Right control
-        0xE5 => "shift".to_string(),    // Right shift
-        0xE6 => "alt".to_string(),      // Right alt
-        0xE7 => "cmd".to_string(),      // Right cmd
-        
+        0xE4 => "control".to_string(), // Right control
+        0xE5 => "shift".to_string(),   // Right shift
+        0xE6 => "alt".to_string(),     // Right alt
+        0xE7 => "cmd".to_string(),     // Right cmd
+
+        // Keypad keys
+        0x53 => "numlock".to_string(),
+        0x54 => "keypad/".to_string(),
+        0x55 => "keypad*".to_string(),
+        0x56 => "keypad-".to_string(),
+        0x57 => "keypad+".to_string(),
+        0x58 => "keypadenter".to_string(),
+        0x59 => "keypad1".to_string(),
+        0x5A => "keypad2".to_string(),
+        0x5B => "keypad3".to_string(),
+        0x5C => "keypad4".to_string(),
+        0x5D => "keypad5".to_string(),
+        0x5E => "keypad6".to_string(),
+        0x5F => "keypad7".to_string(),
+        0x60 => "keypad8".to_string(),
+        0x61 => "keypad9".to_string(),
+        0x62 => "keypad0".to_string(),
+        0x63 => "keypad.".to_string(),
         _ => format!("unknown-{}", key_code),
     }
 }

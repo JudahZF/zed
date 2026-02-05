@@ -5,6 +5,7 @@ mod editorconfig_store;
 mod keymap_file;
 mod settings_file;
 mod settings_store;
+#[cfg(not(target_os = "ios"))]
 mod vscode_import;
 
 pub use settings_macros::RegisterSetting;
@@ -49,6 +50,7 @@ pub use settings_store::{
     SettingsJsonSchemaParams, SettingsKey, SettingsLocation, SettingsParseResult, SettingsStore,
 };
 
+#[cfg(not(target_os = "ios"))]
 pub use vscode_import::{VsCodeSettings, VsCodeSettingsSource};
 
 pub use keymap_file::ActionSequence;

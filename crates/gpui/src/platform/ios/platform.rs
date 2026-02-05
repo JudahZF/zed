@@ -43,7 +43,7 @@ impl IosPlatform {
         let dispatcher = Arc::new(IosDispatcher::new());
 
         #[cfg(feature = "font-kit")]
-        let text_system = Arc::new(crate::platform::ios::text_system::MacTextSystem::new());
+        let text_system = Arc::new(super::MacTextSystem::new()) as Arc<dyn PlatformTextSystem>;
 
         #[cfg(not(feature = "font-kit"))]
         let text_system = Arc::new(crate::NoopTextSystem::new());

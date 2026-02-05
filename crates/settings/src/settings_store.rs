@@ -31,10 +31,12 @@ use util::{
 
 use crate::editorconfig_store::EditorconfigStore;
 
+#[cfg(not(target_os = "ios"))]
+use crate::VsCodeSettings;
 use crate::{
     ActiveSettingsProfileName, FontFamilyName, IconThemeName, LanguageSettingsContent,
     LanguageToSettingsMap, LspSettings, LspSettingsMap, SemanticTokenRules, ThemeName,
-    UserSettingsContentExt, VsCodeSettings, WorktreeId,
+    UserSettingsContentExt, WorktreeId, fallible_options,
     settings_content::{
         ExtensionsSettingsContent, ProjectSettingsContent, RootUserSettings, SettingsContent,
         UserSettingsContent, merge_from::MergeFrom,
@@ -548,6 +550,7 @@ impl SettingsStore {
         });
     }
 
+    #[cfg(not(target_os = "ios"))]
     pub fn import_vscode_settings(
         &self,
         fs: Arc<dyn Fs>,
@@ -756,6 +759,7 @@ impl SettingsStore {
         new_text
     }
 
+    #[cfg(not(target_os = "ios"))]
     pub fn get_vscode_edits(&self, old_text: String, vscode: &VsCodeSettings) -> String {
         self.new_text_for_update(old_text, |content| {
             content.merge_from(&vscode.settings_content())
@@ -1490,8 +1494,10 @@ impl<T: Settings> AnySettingValue for SettingValue<T> {
 mod tests {
     use std::num::NonZeroU32;
 
+    #[cfg(not(target_os = "ios"))]
+    use crate::VsCodeSettingsSource;
     use crate::{
-        ClosePosition, ItemSettingsContent, VsCodeSettingsSource, default_settings,
+        ClosePosition, ItemSettingsContent, default_settings,
         settings_content::LanguageSettingsContent, test_settings,
     };
 
@@ -1876,6 +1882,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "ios"))]
     #[gpui::test]
     fn test_vscode_import(cx: &mut App) {
         let mut store = SettingsStore::new(cx, &test_settings());
@@ -1987,6 +1994,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "ios"))]
     #[track_caller]
     fn check_vscode_import(
         store: &mut SettingsStore,

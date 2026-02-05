@@ -1,12 +1,15 @@
 #[cfg(any(test, feature = "test-support"))]
 use crate::transport::mock::ConnectGuard;
+#[cfg(target_os = "ios")]
+use crate::transport::russh_ssh::RusshRemoteConnection;
+#[cfg(not(target_os = "ios"))]
+use crate::transport::ssh::SshRemoteConnection;
 use crate::{
     SshConnectionOptions,
     protocol::MessageId,
     proxy::ProxyLaunchError,
     transport::{
         docker::{DockerConnectionOptions, DockerExecConnection},
-        ssh::SshRemoteConnection,
         wsl::{WslConnectionOptions, WslRemoteConnection},
     },
 };
@@ -112,6 +115,20 @@ pub struct CommandTemplate {
     pub env: HashMap<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostKeyChallenge {
+    pub host: String,
+    pub port: u16,
+    pub algorithm: String,
+    pub fingerprint_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostKeyDecision {
+    TrustAndSave,
+    Cancel,
+}
+
 /// Whether a command should be run with TTY allocation for interactive use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interactive {
@@ -142,6 +159,12 @@ pub trait RemoteClientDelegate: Send + Sync {
         version: Option<Version>,
         cx: &mut AsyncApp,
     ) -> Task<Result<PathBuf>>;
+    fn confirm_host_key(
+        &self,
+        _challenge: HostKeyChallenge,
+    ) -> BoxFuture<'static, Result<HostKeyDecision>> {
+        async move { Ok(HostKeyDecision::TrustAndSave) }.boxed()
+    }
     fn set_status(&self, status: Option<&str>, cx: &mut AsyncApp);
 }
 
@@ -1217,9 +1240,18 @@ impl ConnectionPool {
                 async move |cx| {
                     let connection = match opts.clone() {
                         RemoteConnectionOptions::Ssh(opts) => {
-                            SshRemoteConnection::new(opts, delegate, cx)
-                                .await
-                                .map(|connection| Arc::new(connection) as Arc<dyn RemoteConnection>)
+                            #[cfg(target_os = "ios")]
+                            {
+                                RusshRemoteConnection::new(opts, delegate, cx).await.map(
+                                    |connection| Arc::new(connection) as Arc<dyn RemoteConnection>,
+                                )
+                            }
+                            #[cfg(not(target_os = "ios"))]
+                            {
+                                SshRemoteConnection::new(opts, delegate, cx).await.map(
+                                    |connection| Arc::new(connection) as Arc<dyn RemoteConnection>,
+                                )
+                            }
                         }
                         RemoteConnectionOptions::Wsl(opts) => {
                             WslRemoteConnection::new(opts, delegate, cx)
