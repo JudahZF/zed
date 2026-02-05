@@ -22169,6 +22169,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "zed_ios"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "askpass",
+ "assets",
+ "client",
+ "editor",
+ "fs",
+ "futures 0.3.31",
+ "gpui",
+ "gpui_tokio",
+ "http_client",
+ "language",
+ "log",
+ "node_runtime",
+ "paths",
+ "project",
+ "project_panel",
+ "release_channel",
+ "remote",
+ "reqwest_client",
+ "semver",
+ "serde",
+ "serde_json",
+ "session",
+ "settings",
+ "smol",
+ "sqlez",
+ "theme",
+ "ui",
+ "unicode-segmentation",
+ "util",
+ "uuid",
+ "watch",
+ "workspace",
+ "zlog",
+]
+
+[[package]]
 name = "zed_proto"
 version = "0.3.1"
 dependencies = [

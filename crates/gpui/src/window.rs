@@ -1537,6 +1537,8 @@ impl Window {
     where
         E: 'static + Render,
     {
+        self.handle.state_type = TypeId::of::<E>();
+        cx.window_handles.insert(self.handle.id, self.handle);
         let view = cx.new(|cx| build_view(self, cx));
         self.root = Some(view.clone().into());
         self.refresh();
@@ -1568,6 +1570,12 @@ impl Window {
 
     /// Close this window.
     pub fn remove_window(&mut self) {
+        // Prevent the platform close callback from re-entering the app during drop.
+        // When the platform window is dropped it will invoke the registered close
+        // callback; if that callback calls back into `App::update` while the app
+        // is already borrowed (e.g., during another update), it can panic. Replace
+        // it with a no-op before marking the window as removed.
+        self.platform_window.on_close(Box::new(|| {}));
         self.removed = true;
     }
 
@@ -1580,9 +1588,11 @@ impl Window {
     /// Move focus to the element associated with the given [`FocusHandle`].
     pub fn focus(&mut self, handle: &FocusHandle, cx: &mut App) {
         if !self.focus_enabled || self.focus == Some(handle.id) {
+            log::debug!("[GPUI] focus(): already focused or disabled, returning early");
             return;
         }
 
+        log::debug!("[GPUI] focus(): setting focus to {:?}", handle.id);
         self.focus = Some(handle.id);
         self.clear_pending_keystrokes();
 
@@ -2209,7 +2219,6 @@ impl Window {
         // Set up the per-App arena for element allocation during this draw.
         // This ensures that multiple test Apps have isolated arenas.
         let _arena_scope = ElementArenaScope::enter(&cx.element_arena);
-
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -2218,6 +2227,7 @@ impl Window {
 
         // Restore the previously-used input handler.
         if let Some(input_handler) = self.platform_window.take_input_handler() {
+            log::debug!("[GPUI] draw(): restored previous input handler");
             self.rendered_frame.input_handlers.push(Some(input_handler));
         }
         if !cx.mode.skip_drawing() {
@@ -2227,7 +2237,12 @@ impl Window {
         self.next_frame.window_active = self.active.get();
 
         // Register requested input handler with the platform window.
+        log::debug!(
+            "[GPUI] draw(): next_frame.input_handlers.len()={}",
+            self.next_frame.input_handlers.len()
+        );
         if let Some(input_handler) = self.next_frame.input_handlers.pop() {
+            log::debug!("[GPUI] draw(): setting input handler on platform window");
             self.platform_window
                 .set_input_handler(input_handler.unwrap());
         }
@@ -3853,7 +3868,16 @@ impl Window {
     ) {
         self.invalidator.debug_assert_paint();
 
-        if focus_handle.is_focused(self) {
+        let is_focused = focus_handle.is_focused(self);
+        log::debug!(
+            "[GPUI] handle_input: is_focused={}, current_focus={:?}, handle_id={:?}",
+            is_focused,
+            self.focus,
+            focus_handle.id
+        );
+
+        if is_focused {
+            log::debug!("[GPUI] handle_input: registering input handler");
             let cx = self.to_async(cx);
             self.next_frame
                 .input_handlers

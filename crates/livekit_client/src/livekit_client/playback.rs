@@ -765,7 +765,7 @@ fn video_frame_buffer_to_webrtc(frame: ScreenCaptureFrame) -> Option<impl AsRef<
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "ios")))]
 fn video_frame_buffer_to_webrtc(frame: ScreenCaptureFrame) -> Option<impl AsRef<dyn VideoBuffer>> {
     use libwebrtc::native::yuv_helper::{abgr_to_nv12, argb_to_nv12};
     use livekit::webrtc::prelude::NV12Buffer;
@@ -821,6 +821,12 @@ fn video_frame_buffer_to_webrtc(frame: ScreenCaptureFrame) -> Option<impl AsRef<
             None
         }
     }
+}
+
+#[cfg(target_os = "ios")]
+fn video_frame_buffer_to_webrtc(_frame: ScreenCaptureFrame) -> Option<impl AsRef<dyn VideoBuffer>> {
+    // Screen capture is not supported on iOS
+    None::<livekit::webrtc::video_frame::native::NativeBuffer>
 }
 
 trait DeviceChangeListenerApi: Stream<Item = ()> + Sized {

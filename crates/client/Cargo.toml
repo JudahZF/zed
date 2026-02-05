@@ -74,12 +74,12 @@ util = { workspace = true, features = ["test-support"] }
 semver.workspace = true
 windows.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2-foundation.workspace = true
 
-[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "ios"))'.dependencies]
 tokio-native-tls = "0.3"
 
-[target.'cfg(not(any(target_os = "windows", target_os = "macos")))'.dependencies]
+[target.'cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios")))'.dependencies]
 rustls-pki-types = "1.12"
 tokio-rustls = { version = "0.26", features = ["tls12", "ring"], default-features = false }

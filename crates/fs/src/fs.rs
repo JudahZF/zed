@@ -1,3 +1,7 @@
+#[cfg(target_os = "macos")]
+mod mac_watcher;
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub mod fs_watcher;
 
 use parking_lot::Mutex;
@@ -27,7 +31,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "ios"))]
 use std::mem::MaybeUninit;
 
 use async_tar::Archive;
@@ -325,7 +329,7 @@ pub trait FileHandle: Send + Sync + std::fmt::Debug {
 }
 
 impl FileHandle for std::fs::File {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn current_path(&self, _: &Arc<dyn Fs>) -> Result<PathBuf> {
         use std::{
             ffi::{CStr, OsStr},
@@ -340,7 +344,10 @@ impl FileHandle for std::fs::File {
 
         // SAFETY: `fcntl` will initialize the path buffer.
         let c_str = unsafe { CStr::from_ptr(path_buf.as_ptr().cast()) };
-        anyhow::ensure!(!c_str.is_empty(), "Could find a path for the file handle");
+        anyhow::ensure!(
+            !c_str.is_empty(),
+            "Couldn't find a path for the file handle"
+        );
         let path = PathBuf::from(OsStr::from_bytes(c_str.to_bytes()));
         Ok(path)
     }
@@ -376,7 +383,10 @@ impl FileHandle for std::fs::File {
 
         // SAFETY: `fcntl` will initialize the kif.
         let c_str = unsafe { CStr::from_ptr(kif.assume_init().kf_path.as_ptr()) };
-        anyhow::ensure!(!c_str.is_empty(), "Could find a path for the file handle");
+        anyhow::ensure!(
+            !c_str.is_empty(),
+            "Couldn't find a path for the file handle"
+        );
         let path = PathBuf::from(OsStr::from_bytes(c_str.to_bytes()));
         Ok(path)
     }
@@ -411,7 +421,10 @@ impl FileHandle for std::fs::File {
         );
 
         let os_str: OsString = OsString::from_wide(&buf[..written as usize]);
-        anyhow::ensure!(!os_str.is_empty(), "Could find a path for the file handle");
+        anyhow::ensure!(
+            !os_str.is_empty(),
+            "Couldn't find a path for the file handle"
+        );
         Ok(PathBuf::from(os_str))
     }
 }
@@ -1042,6 +1055,62 @@ impl Fs for RealFs {
         Ok(Box::pin(result))
     }
 
+    #[cfg(target_os = "macos")]
+    async fn watch(
+        &self,
+        path: &Path,
+        latency: Duration,
+    ) -> (
+        Pin<Box<dyn Send + Stream<Item = Vec<PathEvent>>>>,
+        Arc<dyn Watcher>,
+    ) {
+        use fsevent::StreamFlags;
+
+        let (events_tx, events_rx) = smol::channel::unbounded();
+        let handles = Arc::new(parking_lot::Mutex::new(collections::BTreeMap::default()));
+        let watcher = Arc::new(mac_watcher::MacWatcher::new(
+            events_tx,
+            Arc::downgrade(&handles),
+            latency,
+        ));
+        watcher.add(path).expect("handles can't be dropped");
+
+        (
+            Box::pin(
+                events_rx
+                    .map(|events| {
+                        events
+                            .into_iter()
+                            .map(|event| {
+                                log::trace!("fs path event: {event:?}");
+                                let kind = if event.flags.contains(StreamFlags::ITEM_REMOVED) {
+                                    Some(PathEventKind::Removed)
+                                } else if event.flags.contains(StreamFlags::ITEM_CREATED) {
+                                    Some(PathEventKind::Created)
+                                } else if event.flags.contains(StreamFlags::ITEM_MODIFIED)
+                                    | event.flags.contains(StreamFlags::ITEM_RENAMED)
+                                {
+                                    Some(PathEventKind::Changed)
+                                } else {
+                                    None
+                                };
+                                PathEvent {
+                                    path: event.path,
+                                    kind,
+                                }
+                            })
+                            .collect()
+                    })
+                    .chain(futures::stream::once(async move {
+                        drop(handles);
+                        vec![]
+                    })),
+            ),
+            watcher,
+        )
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     async fn watch(
         &self,
         path: &Path,
@@ -1104,6 +1173,24 @@ impl Fs for RealFs {
             })),
             watcher,
         )
+    }
+
+    #[cfg(target_os = "ios")]
+    async fn watch(
+        &self,
+        _path: &Path,
+        _latency: Duration,
+    ) -> (
+        Pin<Box<dyn Send + Stream<Item = Vec<PathEvent>>>>,
+        Arc<dyn Watcher>,
+    ) {
+        // iOS is a remote-first client - file watching is handled on the remote machine.
+        // Return an empty stream and a no-op watcher.
+        eprintln!(
+            "Warning: file watching is not supported on iOS; returning an empty stream and a no-op watcher."
+        );
+        let watcher = Arc::new(RealWatcher {});
+        (Box::pin(futures::stream::empty()), watcher)
     }
 
     fn open_repo(

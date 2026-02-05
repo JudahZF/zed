@@ -1,0 +1,128 @@
+name: Zed
+options:
+  bundleIdPrefix: dev.zed
+  deploymentTarget:
+    iOS: "18.0"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: true
+  groupSortPosition: top
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_BITCODE: NO
+    SWIFT_VERSION: "6.2"
+    CLANG_CXX_LANGUAGE_STANDARD: c++17
+    TARGETED_DEVICE_FAMILY: "2"
+  configs:
+    Debug:
+      EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+    Release:
+      EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+
+targets:
+  Zed:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: Zed
+        excludes:
+          - "*.xcassets"
+          - "Entitlements.plist"
+          - "*.pch"
+      - path: Zed/Assets.xcassets
+        type: folder
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.zed.Zed
+        PRODUCT_NAME: Zed
+        INFOPLIST_FILE: Zed/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Zed/Entitlements.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "2"
+        SUPPORTS_MACCATALYST: NO
+        LIBRARY_SEARCH_PATHS: "$(inherited)"
+        LIBRARY_SEARCH_PATHS[config=Debug][sdk=iphonesimulator*]: "$(inherited) $(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/debug"
+        LIBRARY_SEARCH_PATHS[config=Release][sdk=iphonesimulator*]: "$(inherited) $(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/release"
+        LIBRARY_SEARCH_PATHS[config=Debug][sdk=iphoneos*]: "$(inherited) $(PROJECT_DIR)/../../../target/aarch64-apple-ios/debug"
+        LIBRARY_SEARCH_PATHS[config=Release][sdk=iphoneos*]: "$(inherited) $(PROJECT_DIR)/../../../target/aarch64-apple-ios/release"
+        OTHER_LDFLAGS:
+          - "-lzed_ios"
+          - "-lc++"
+          - "-lz"
+          - "-liconv"
+          - "-framework Metal"
+          - "-framework MetalKit"
+          - "-framework UIKit"
+          - "-framework QuartzCore"
+          - "-framework CoreGraphics"
+          - "-framework CoreText"
+          - "-framework Security"
+          - "-framework Foundation"
+          - "-framework SystemConfiguration"
+          - "-framework CoreFoundation"
+          - "-framework AudioToolbox"
+          - "-framework CoreMedia"
+          - "-framework VideoToolbox"
+          - "-framework AVFoundation"
+          - "-framework CoreVideo"
+          - "-framework CoreServices"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    preBuildScripts:
+      - name: Build Rust Library
+        script: |
+          set -e
+          cd "${PROJECT_DIR}/../../.."
+          
+          # Add common cargo locations to PATH
+          export PATH="$HOME/.cargo/bin:$PATH"
+          
+          # Verify cargo is available
+          if ! command -v cargo &> /dev/null; then
+            echo "error: cargo not found in PATH"
+            echo "Please install Rust via https://rustup.rs or ensure cargo is in your PATH."
+            echo "If cargo is installed in a custom location, add it to your PATH before building."
+            echo "Searched PATH: $PATH"
+            exit 1
+          fi
+          
+          # Determine the Rust target based on SDK
+          if [ "$PLATFORM_NAME" = "iphonesimulator" ]; then
+            RUST_TARGET="aarch64-apple-ios-sim"
+          else
+            RUST_TARGET="aarch64-apple-ios"
+          fi
+          
+          # Determine build configuration
+          if [ "$CONFIGURATION" = "Release" ]; then
+            RUST_PROFILE="--release"
+          else
+            RUST_PROFILE=""
+          fi
+          
+          echo "Building zed_ios for $RUST_TARGET ($CONFIGURATION)"
+          cargo build -p zed_ios --target "$RUST_TARGET" $RUST_PROFILE
+        basedOnDependencyAnalysis: false
+        outputFiles:
+          - "$(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/debug/libzed_ios.a"
+          - "$(PROJECT_DIR)/../../../target/aarch64-apple-ios-sim/release/libzed_ios.a"
+          - "$(PROJECT_DIR)/../../../target/aarch64-apple-ios/debug/libzed_ios.a"
+          - "$(PROJECT_DIR)/../../../target/aarch64-apple-ios/release/libzed_ios.a"
+
+schemes:
+  Zed:
+    build:
+      targets:
+        Zed: all
+    run:
+      config: Debug
+      commandLineArguments:
+        "-AppleLanguages (en)": true
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

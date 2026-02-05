@@ -121,6 +121,11 @@ pub fn os_name() -> String {
     {
         "Windows".to_string()
     }
+
+    #[cfg(target_os = "ios")]
+    {
+        "iOS".to_string()
+    }
 }
 
 /// Note: This might do blocking IO! Only call from background threads
@@ -182,6 +187,14 @@ pub fn os_version() -> String {
         } else {
             "unknown".to_string()
         }
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        use objc2_foundation::NSProcessInfo;
+        let process_info = NSProcessInfo::processInfo();
+        let version = process_info.operatingSystemVersion();
+        format!("{}.{}.{}", version.majorVersion, version.minorVersion, version.patchVersion)
     }
 }
 

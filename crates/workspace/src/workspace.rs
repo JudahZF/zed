@@ -1284,6 +1284,7 @@ struct DispatchingKeystrokes {
 /// that can be used to register a global action to be triggered from any place in the window.
 pub struct Workspace {
     weak_self: WeakEntity<Self>,
+    registered_window_handle: Option<WindowHandle<Workspace>>,
     workspace_actions: Vec<Box<dyn Fn(Div, &Workspace, &mut Window, &mut Context<Self>) -> Div>>,
     zoomed: Option<AnyWeakView>,
     previous_dock_drag_coordinates: Option<Point<Pixels>>,
@@ -1568,6 +1569,9 @@ impl Workspace {
                 .workspaces
                 .insert((any_window_handle, weak_handle.clone()));
         });
+        cx.defer_in(window, move |this, window, _| {
+            this.registered_window_handle = window.window_handle().downcast::<Workspace>();
+        });
 
         let mut current_user = app_state.user_store.read(cx).watch_current_user();
         let mut connection_status = app_state.client.status();
@@ -1669,9 +1673,10 @@ impl Workspace {
             cx.on_release({
                 let weak_handle = weak_handle.clone();
                 move |this, cx| {
+                    this.registered_window_handle = None;
                     this.app_state.workspace_store.update(cx, move |store, _| {
                         store.workspaces.retain(|(_, weak)| weak != &weak_handle);
-                    })
+                    });
                 }
             }),
         ];
@@ -1687,6 +1692,7 @@ impl Workspace {
 
         Workspace {
             weak_self: weak_handle.clone(),
+            registered_window_handle: None,
             zoomed: None,
             zoomed_position: None,
             previous_dock_drag_coordinates: None,
