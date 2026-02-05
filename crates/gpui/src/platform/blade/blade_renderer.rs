@@ -561,6 +561,16 @@ impl BladeRenderer {
         objc2::rc::Retained::as_ptr(&self.surface.metal_layer()) as *mut _
     }
 
+    #[cfg(target_os = "ios")]
+    pub fn layer(&self) -> metal::MetalLayer {
+        unsafe { foreign_types::ForeignType::from_ptr(self.layer_ptr()) }
+    }
+
+    #[cfg(target_os = "ios")]
+    pub fn layer_ptr(&self) -> *mut metal::CAMetalLayer {
+        objc2::rc::Retained::as_ptr(&self.surface.metal_layer()) as *mut _
+    }
+
     #[profiling::function]
     fn draw_paths_to_intermediate(
         &mut self,

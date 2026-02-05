@@ -168,7 +168,8 @@ pathfinder_geometry = "0.5"
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))'.dependencies]
 scap = { workspace = true, optional = true }
 
-# iOS dependencies - shares many with macOS since both use Metal and Core Text
+# iOS dependencies - uses Blade renderer (WGSL shaders) instead of Metal shaders
+# to avoid [[clip_distance]] feature not supported on iOS Simulator
 [target.'cfg(target_os = "ios")'.dependencies]
 bitflags = { workspace = true }
 block = "0.1"
@@ -182,6 +183,12 @@ foreign-types = "0.5"
 objc.workspace = true
 metal.workspace = true
 flume = "0.11"
+# Blade renderer for iOS (uses WGSL shaders, avoids Metal clip_distance issues)
+blade-graphics.workspace = true
+blade-macros.workspace = true
+blade-util.workspace = true
+bytemuck = "1"
+objc2 = "0.6"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 # Always used

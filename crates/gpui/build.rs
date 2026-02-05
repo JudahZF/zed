@@ -22,9 +22,10 @@ fn main() {
             macos::build();
         }
         Ok("ios") => {
-            // iOS uses the same Metal shaders as macOS
+            // iOS uses the Blade renderer with WGSL shaders (cross-platform).
+            // Check shaders when cross-compiling from macOS.
             #[cfg(target_os = "macos")]
-            ios::build();
+            check_wgsl_shaders_for_ios();
         }
         Ok("windows") => {
             #[cfg(target_os = "windows")]
@@ -39,6 +40,19 @@ fn main() {
     all(target_os = "macos", feature = "macos-blade")
 ))]
 fn check_wgsl_shaders() {
+    check_wgsl_shaders_impl();
+}
+
+#[cfg(target_os = "macos")]
+fn check_wgsl_shaders_for_ios() {
+    check_wgsl_shaders_impl();
+}
+
+#[cfg(any(
+    target_os = "macos",
+    not(any(target_os = "macos", target_os = "windows")),
+))]
+fn check_wgsl_shaders_impl() {
     use std::path::PathBuf;
     use std::process;
     use std::str::FromStr;
@@ -500,140 +514,5 @@ mod windows {
         options
             .write_all(rust_binding.as_bytes())
             .expect("Failed to write Rust binding file");
-    }
-}
-
-// iOS build module - cross-compiles Metal shaders for iOS from macOS host
-#[cfg(target_os = "macos")]
-mod ios {
-    use std::{
-        env,
-        path::{Path, PathBuf},
-    };
-
-    use cbindgen::Config;
-
-    pub(super) fn build() {
-        let header_path = generate_shader_bindings();
-        compile_metal_shaders(&header_path);
-    }
-
-    fn generate_shader_bindings() -> PathBuf {
-        let output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("scene.h");
-        let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-        let mut config = Config {
-            include_guard: Some("SCENE_H".into()),
-            language: cbindgen::Language::C,
-            no_includes: true,
-            ..Default::default()
-        };
-        config.export.include.extend([
-            "Bounds".into(),
-            "Corners".into(),
-            "Edges".into(),
-            "Size".into(),
-            "Pixels".into(),
-            "PointF".into(),
-            "Hsla".into(),
-            "ContentMask".into(),
-            "Uniforms".into(),
-            "AtlasTile".into(),
-            "PathRasterizationInputIndex".into(),
-            "PathVertex_ScaledPixels".into(),
-            "PathRasterizationVertex".into(),
-            "ShadowInputIndex".into(),
-            "Shadow".into(),
-            "QuadInputIndex".into(),
-            "Underline".into(),
-            "UnderlineInputIndex".into(),
-            "Quad".into(),
-            "BorderStyle".into(),
-            "SpriteInputIndex".into(),
-            "MonochromeSprite".into(),
-            "PolychromeSprite".into(),
-            "PathSprite".into(),
-            "SurfaceInputIndex".into(),
-            "SurfaceBounds".into(),
-            "TransformationMatrix".into(),
-        ]);
-        config.no_includes = true;
-        config.enumeration.prefix_with_name = true;
-
-        let mut builder = cbindgen::Builder::new();
-
-        // Use the same shader sources as macOS - Metal shaders are compatible
-        let src_paths = [
-            crate_dir.join("src/scene.rs"),
-            crate_dir.join("src/geometry.rs"),
-            crate_dir.join("src/color.rs"),
-            crate_dir.join("src/window.rs"),
-            crate_dir.join("src/platform.rs"),
-            crate_dir.join("src/platform/mac/metal_renderer.rs"),
-        ];
-        for src_path in src_paths {
-            println!("cargo:rerun-if-changed={}", src_path.display());
-            builder = builder.with_src(src_path);
-        }
-
-        builder
-            .with_config(config)
-            .generate()
-            .expect("Unable to generate bindings")
-            .write_to_file(&output_path);
-        output_path
-    }
-
-    fn compile_metal_shaders(header_path: &Path) {
-        use std::process::{self, Command};
-
-        // Use the same shader file as macOS - Metal shaders are compatible
-        let shader_path = "./src/platform/mac/shaders.metal";
-        let air_output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.air");
-        let metallib_output_path =
-            PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.metallib");
-        println!("cargo:rerun-if-changed={}", shader_path);
-
-        // Compile for iOS using iphoneos SDK
-        let output = Command::new("xcrun")
-            .args([
-                "-sdk",
-                "iphoneos",
-                "metal",
-                "-gline-tables-only",
-                "-mios-version-min=26.0",
-                "-MO",
-                "-c",
-                shader_path,
-                "-include",
-                (header_path.to_str().unwrap()),
-                "-o",
-            ])
-            .arg(&air_output_path)
-            .output()
-            .unwrap();
-
-        if !output.status.success() {
-            println!(
-                "cargo::error=iOS metal shader compilation failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            process::exit(1);
-        }
-
-        let output = Command::new("xcrun")
-            .args(["-sdk", "iphoneos", "metallib"])
-            .arg(air_output_path)
-            .arg("-o")
-            .arg(metallib_output_path)
-            .output()
-            .unwrap();
-
-        if !output.status.success() {
-            println!(
-                "cargo::error=iOS metallib compilation failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            process::exit(1);
-        }
     }
 }

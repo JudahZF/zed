@@ -37,10 +37,10 @@ pub enum UIPressPhase {
 pub struct UIKeyModifierFlags(pub i64);
 
 impl UIKeyModifierFlags {
-    pub const ALPHA_SHIFT: i64 = 1 << 16;  // Caps Lock
+    pub const ALPHA_SHIFT: i64 = 1 << 16; // Caps Lock
     pub const SHIFT: i64 = 1 << 17;
     pub const CONTROL: i64 = 1 << 18;
-    pub const ALTERNATE: i64 = 1 << 19;   // Option
+    pub const ALTERNATE: i64 = 1 << 19; // Option
     pub const COMMAND: i64 = 1 << 20;
     pub const NUMERIC_PAD: i64 = 1 << 21;
 
@@ -53,7 +53,7 @@ impl UIKeyModifierFlags {
             control: self.contains(Self::CONTROL),
             alt: self.contains(Self::ALTERNATE),
             shift: self.contains(Self::SHIFT),
-            platform: self.contains(Self::COMMAND),  // Command key on Apple platforms
+            platform: self.contains(Self::COMMAND), // Platform-specific modifier key
             function: false,
         }
     }
@@ -128,8 +128,8 @@ pub fn translate_pan_to_scroll(
         let _: () = msg_send![gesture, setTranslation: zero inView: view];
 
         let touch_phase = match state {
-            1 => GpuiTouchPhase::Started,  // UIGestureRecognizerStateBegan
-            2 => GpuiTouchPhase::Moved,    // UIGestureRecognizerStateChanged
+            1 => GpuiTouchPhase::Started,   // UIGestureRecognizerStateBegan
+            2 => GpuiTouchPhase::Moved,     // UIGestureRecognizerStateChanged
             3 | 4 => GpuiTouchPhase::Ended, // UIGestureRecognizerStateEnded/Cancelled
             _ => return None,
         };
@@ -160,7 +160,7 @@ pub fn translate_key_press(
         let modifier_flags: i64 = msg_send![key, modifierFlags];
 
         let modifiers = UIKeyModifierFlags(modifier_flags).to_modifiers();
-        
+
         // Get the character string
         let key_str = if !characters.is_null() {
             let len: usize = msg_send![characters, length];
@@ -185,7 +185,9 @@ pub fn translate_key_press(
         let key_char = key_str.clone();
 
         // Map UIKeyboardHIDUsage to key string
-        let key = key_str.clone().unwrap_or_else(|| key_code_to_string(key_code));
+        let key = key_str
+            .clone()
+            .unwrap_or_else(|| key_code_to_string(key_code));
 
         let keystroke = Keystroke {
             key: key.into(),
@@ -208,9 +210,11 @@ pub fn translate_key_press(
 /// Translate a modifier flags change to a modifiers changed event.
 pub fn translate_modifiers_changed(modifier_flags: i64) -> PlatformInput {
     let modifiers = UIKeyModifierFlags(modifier_flags).to_modifiers();
-    PlatformInput::ModifiersChanged(ModifiersChangedEvent { 
+    PlatformInput::ModifiersChanged(ModifiersChangedEvent {
         modifiers,
-        capslock: Capslock { on: UIKeyModifierFlags(modifier_flags).contains(UIKeyModifierFlags::ALPHA_SHIFT) },
+        capslock: Capslock {
+            on: UIKeyModifierFlags(modifier_flags).contains(UIKeyModifierFlags::ALPHA_SHIFT),
+        },
     })
 }
 
@@ -229,7 +233,7 @@ fn key_code_to_string(key_code: i64) -> String {
             c.to_string()
         }
         0x27 => "0".to_string(),
-        
+
         // Special keys
         0x28 => "enter".to_string(),
         0x29 => "escape".to_string(),
@@ -247,7 +251,7 @@ fn key_code_to_string(key_code: i64) -> String {
         0x36 => ",".to_string(),
         0x37 => ".".to_string(),
         0x38 => "/".to_string(),
-        
+
         // Function keys
         0x3A => "f1".to_string(),
         0x3B => "f2".to_string(),
@@ -261,7 +265,7 @@ fn key_code_to_string(key_code: i64) -> String {
         0x43 => "f10".to_string(),
         0x44 => "f11".to_string(),
         0x45 => "f12".to_string(),
-        
+
         // Navigation
         0x49 => "insert".to_string(),
         0x4A => "home".to_string(),
@@ -273,17 +277,17 @@ fn key_code_to_string(key_code: i64) -> String {
         0x50 => "left".to_string(),
         0x51 => "down".to_string(),
         0x52 => "up".to_string(),
-        
+
         // Modifiers (these usually don't come through as key events)
         0xE0 => "control".to_string(),
         0xE1 => "shift".to_string(),
         0xE2 => "alt".to_string(),
         0xE3 => "cmd".to_string(),
-        0xE4 => "control".to_string(),  // Right control
-        0xE5 => "shift".to_string(),    // Right shift
-        0xE6 => "alt".to_string(),      // Right alt
-        0xE7 => "cmd".to_string(),      // Right cmd
-        
+        0xE4 => "control".to_string(), // Right control
+        0xE5 => "shift".to_string(),   // Right shift
+        0xE6 => "alt".to_string(),     // Right alt
+        0xE7 => "cmd".to_string(),     // Right cmd
+
         _ => format!("unknown-{}", key_code),
     }
 }

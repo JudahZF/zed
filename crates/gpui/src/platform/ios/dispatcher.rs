@@ -3,8 +3,8 @@
 //! This is nearly identical to the macOS dispatcher since GCD is available on both platforms.
 
 use crate::{
-    PlatformDispatcher, Priority, RealtimePriority, RunnableMeta, RunnableVariant,
-    TaskLabel, TaskTiming, ThreadTaskTimings, GLOBAL_THREAD_TIMINGS, THREAD_TIMINGS,
+    GLOBAL_THREAD_TIMINGS, PlatformDispatcher, Priority, RealtimePriority, RunnableMeta,
+    RunnableVariant, THREAD_TIMINGS, TaskLabel, TaskTiming, ThreadTaskTimings,
 };
 use async_task::Runnable;
 use objc::{
@@ -14,6 +14,7 @@ use objc::{
 };
 use std::{
     ffi::c_void,
+    panic::Location,
     ptr::NonNull,
     time::{Duration, Instant},
 };
@@ -40,6 +41,12 @@ unsafe extern "C" {
         work: dispatch_function_t,
     );
     fn dispatch_time(when: dispatch_time_t, delta: i64) -> dispatch_time_t;
+}
+
+/// Payload for compat runnables that stores the source location captured at dispatch time.
+struct RunnableCompatPayload {
+    runnable_ptr: *mut (),
+    location: &'static Location<'static>,
 }
 
 pub(crate) struct IosDispatcher;
@@ -80,16 +87,23 @@ impl PlatformDispatcher for IosDispatcher {
         is_main_thread == YES
     }
 
+    #[track_caller]
     fn dispatch(&self, runnable: RunnableVariant, _label: Option<TaskLabel>, priority: Priority) {
         let (context, trampoline) = match runnable {
             RunnableVariant::Meta(runnable) => (
                 runnable.into_raw().as_ptr() as *mut c_void,
                 Some(trampoline as unsafe extern "C" fn(*mut c_void)),
             ),
-            RunnableVariant::Compat(runnable) => (
-                runnable.into_raw().as_ptr() as *mut c_void,
-                Some(trampoline_compat as unsafe extern "C" fn(*mut c_void)),
-            ),
+            RunnableVariant::Compat(runnable) => {
+                let payload = Box::new(RunnableCompatPayload {
+                    runnable_ptr: runnable.into_raw().as_ptr(),
+                    location: Location::caller(),
+                });
+                (
+                    Box::into_raw(payload) as *mut c_void,
+                    Some(trampoline_compat as unsafe extern "C" fn(*mut c_void)),
+                )
+            }
         };
 
         let queue_priority = match priority {
@@ -108,32 +122,46 @@ impl PlatformDispatcher for IosDispatcher {
         }
     }
 
+    #[track_caller]
     fn dispatch_on_main_thread(&self, runnable: RunnableVariant, _priority: Priority) {
         let (context, trampoline) = match runnable {
             RunnableVariant::Meta(runnable) => (
                 runnable.into_raw().as_ptr() as *mut c_void,
                 Some(trampoline as unsafe extern "C" fn(*mut c_void)),
             ),
-            RunnableVariant::Compat(runnable) => (
-                runnable.into_raw().as_ptr() as *mut c_void,
-                Some(trampoline_compat as unsafe extern "C" fn(*mut c_void)),
-            ),
+            RunnableVariant::Compat(runnable) => {
+                let payload = Box::new(RunnableCompatPayload {
+                    runnable_ptr: runnable.into_raw().as_ptr(),
+                    location: Location::caller(),
+                });
+                (
+                    Box::into_raw(payload) as *mut c_void,
+                    Some(trampoline_compat as unsafe extern "C" fn(*mut c_void)),
+                )
+            }
         };
         unsafe {
             dispatch_async_f(dispatch_get_main_queue(), context, trampoline);
         }
     }
 
+    #[track_caller]
     fn dispatch_after(&self, duration: Duration, runnable: RunnableVariant) {
         let (context, trampoline) = match runnable {
             RunnableVariant::Meta(runnable) => (
                 runnable.into_raw().as_ptr() as *mut c_void,
                 Some(trampoline as unsafe extern "C" fn(*mut c_void)),
             ),
-            RunnableVariant::Compat(runnable) => (
-                runnable.into_raw().as_ptr() as *mut c_void,
-                Some(trampoline_compat as unsafe extern "C" fn(*mut c_void)),
-            ),
+            RunnableVariant::Compat(runnable) => {
+                let payload = Box::new(RunnableCompatPayload {
+                    runnable_ptr: runnable.into_raw().as_ptr(),
+                    location: Location::caller(),
+                });
+                (
+                    Box::into_raw(payload) as *mut c_void,
+                    Some(trampoline_compat as unsafe extern "C" fn(*mut c_void)),
+                )
+            }
         };
         unsafe {
             let queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0);
@@ -193,10 +221,10 @@ extern "C" fn trampoline(runnable: *mut c_void) {
     });
 }
 
-extern "C" fn trampoline_compat(runnable: *mut c_void) {
-    let task = unsafe { Runnable::<()>::from_raw(NonNull::new_unchecked(runnable as *mut ())) };
-
-    let location = core::panic::Location::caller();
+extern "C" fn trampoline_compat(payload_ptr: *mut c_void) {
+    let payload = unsafe { Box::from_raw(payload_ptr as *mut RunnableCompatPayload) };
+    let location = payload.location;
+    let task = unsafe { Runnable::<()>::from_raw(NonNull::new_unchecked(payload.runnable_ptr)) };
 
     let start = Instant::now();
     let timing = TaskTiming {

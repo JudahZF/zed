@@ -34,7 +34,7 @@ impl IosDisplay {
         unsafe {
             let screens: *mut Object = msg_send![class!(UIScreen), screens];
             let count: usize = msg_send![screens, count];
-            
+
             (0..count)
                 .map(|i| {
                     let screen: *mut Object = msg_send![screens, objectAtIndex: i];
@@ -62,14 +62,29 @@ impl IosDisplay {
 
 impl PlatformDisplay for IosDisplay {
     fn id(&self) -> DisplayId {
-        // iOS doesn't have a direct equivalent to CGDirectDisplayID,
-        // so we use a hash of the screen pointer as an identifier.
-        // This is stable for the lifetime of the app.
-        // Use lower bits of pointer hash to avoid truncation issues
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (self.screen as usize).hash(&mut hasher);
-        DisplayId(hasher.finish() as u32)
+        // iOS doesn't have a direct equivalent to CGDirectDisplayID.
+        // We find this screen's index in the screens array to use as the ID.
+        // This approach avoids hash truncation issues and works well since iOS
+        // devices typically have very few displays (1 built-in + possible external).
+        // The ID is stable for the lifetime of the app as long as the display
+        // configuration doesn't change.
+        unsafe {
+            let screens: *mut Object = msg_send![class!(UIScreen), screens];
+            let count: usize = msg_send![screens, count];
+
+            for i in 0..count {
+                let screen: *mut Object = msg_send![screens, objectAtIndex: i];
+                if screen == self.screen {
+                    return DisplayId(i as u32);
+                }
+            }
+
+            // Fallback: if screen not found in array (shouldn't happen),
+            // use the pointer value directly. On 64-bit iOS, pointers are
+            // typically in lower address ranges, so truncation is unlikely
+            // to cause collisions in practice.
+            DisplayId(self.screen as u32)
+        }
     }
 
     fn uuid(&self) -> Result<Uuid> {
@@ -79,7 +94,7 @@ impl PlatformDisplay for IosDisplay {
         unsafe {
             let bounds: CGRect = msg_send![self.screen, nativeBounds];
             let scale: f64 = msg_send![self.screen, scale];
-            
+
             // Create a reproducible UUID from screen properties
             let data = format!(
                 "ios-screen-{}-{}-{}",
@@ -87,7 +102,7 @@ impl PlatformDisplay for IosDisplay {
                 bounds.size.height as u32,
                 (scale * 100.0) as u32
             );
-            
+
             Ok(Uuid::new_v5(&Uuid::NAMESPACE_OID, data.as_bytes()))
         }
     }

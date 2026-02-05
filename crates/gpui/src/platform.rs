@@ -16,7 +16,8 @@ mod ios;
         any(target_os = "linux", target_os = "freebsd"),
         any(feature = "x11", feature = "wayland")
     ),
-    all(target_os = "macos", feature = "macos-blade")
+    all(target_os = "macos", feature = "macos-blade"),
+    target_os = "ios"
 ))]
 mod blade;
 

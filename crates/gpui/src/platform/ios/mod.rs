@@ -1,8 +1,8 @@
 //! iOS platform implementation for GPUI.
 //!
 //! This module provides the iOS-specific platform layer, enabling GPUI to run on iPadOS.
-//! It leverages the existing Metal renderer and provides UIKit integration
-//! for window management, input handling, and system services.
+//! It uses the Blade renderer (WGSL shaders) instead of raw Metal shaders to avoid
+//! the [[clip_distance]] feature which is not supported on iOS Simulator.
 //!
 //! Key differences from macOS:
 //! - Uses UIWindow/UIView instead of NSWindow/NSView
@@ -17,14 +17,8 @@ mod events;
 mod platform;
 mod window;
 
-// iOS-specific Metal renderer (adapted from macOS, no core_video dependency)
-pub mod metal_renderer;
-
-// metal_atlas has no cocoa dependencies, can be shared via #[path]
-#[path = "../mac/metal_atlas.rs"]
-mod metal_atlas;
-
-use metal_renderer as renderer;
+// Use Blade renderer for iOS (WGSL shaders avoid Metal clip_distance issues)
+use super::blade as renderer;
 
 // iOS-specific open_type module (adapted from macOS, local CGFloat)
 #[cfg(feature = "font-kit")]
@@ -36,8 +30,7 @@ mod text_system;
 
 use crate::{DevicePixels, Pixels, Size, px, size};
 use objc::{
-    Encode, Encoding,
-    msg_send,
+    Encode, Encoding, msg_send,
     runtime::{BOOL, NO, YES},
     sel, sel_impl,
 };
@@ -68,20 +61,16 @@ impl BoolExt for bool {
 /// Helper to create an NSString from a Rust string slice
 unsafe fn ns_string(string: &str) -> *mut objc::runtime::Object {
     use objc::class;
-    unsafe {
-        let ns_string: *mut objc::runtime::Object = msg_send![class!(NSString), alloc];
-        let ns_string: *mut objc::runtime::Object = msg_send![
-            ns_string,
-            initWithBytes: string.as_ptr() as *const c_void
-            length: string.len()
-            encoding: 4u64 // NSUTF8StringEncoding
-        ];
-        let _: *mut objc::runtime::Object = msg_send![ns_string, autorelease];
-        ns_string
-    }
+    let ns_string: *mut objc::runtime::Object = msg_send![class!(NSString), alloc];
+    let ns_string: *mut objc::runtime::Object = msg_send![
+        ns_string,
+        initWithBytes: string.as_ptr() as *const c_void
+        length: string.len()
+        encoding: 4u64 // NSUTF8StringEncoding
+    ];
+    let _: *mut objc::runtime::Object = msg_send![ns_string, autorelease];
+    ns_string
 }
-
-/// CGSize to Size<Pixels> conversion
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct CGSize {
