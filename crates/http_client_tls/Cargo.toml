@@ -16,5 +16,6 @@ path = "src/http_client_tls.rs"
 doctest = true
 
 [dependencies]
+ring.workspace = true
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
