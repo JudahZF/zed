@@ -6,12 +6,13 @@
 use std::ops::Range;
 
 use gpui::{
-    div, fill, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds, ClipboardItem,
-    Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, GlobalElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    PaintQuad, Pixels, Point, Render, Rgba, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, Window,
+    div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
+    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
+    Focusable, GlobalElementId, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
+    Window,
 };
+use theme::ActiveTheme;
 use unicode_segmentation::UnicodeSegmentation;
 
 gpui::actions!(
@@ -517,15 +518,16 @@ impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_focused = self.focus_handle.is_focused(window);
 
-        let bg_color = rgb(0x313244);
+        let colors = cx.theme().colors();
+        let bg_color = colors.element_background;
         let border_color = if is_focused {
-            rgb(0x89b4fa)
+            colors.border_focused
         } else {
-            rgb(0x45475a)
+            colors.border
         };
-        let text_color = rgb(0xcdd6f4);
-        let placeholder_color = rgb(0x6c7086);
-        let selection_color = rgba(0x89b4fa40);
+        let text_color = colors.text;
+        let placeholder_color = colors.text_placeholder;
+        let selection_color = colors.element_selection_background;
 
         let display_text = self.display_text();
         let show_placeholder = display_text.is_empty();
@@ -545,7 +547,7 @@ impl Render for TextInput {
                 el.child(
                     div()
                         .text_size(px(14.0))
-                        .text_color(rgb(0xa6adc8))
+                        .text_color(colors.text_muted)
                         .child(label),
                 )
             })
@@ -590,64 +592,18 @@ impl Render for TextInput {
                             |this, event: &gpui::KeyDownEvent, window, cx| {
                                 let key: &str = event.keystroke.key.as_ref();
 
-                                if key.is_empty() {
-                                    return;
-                                }
-
-                                if key.starts_with("unknown-") {
-                                    return;
-                                }
-
-                                let modifier_keys = [
-                                    "shift",
-                                    "control",
-                                    "alt",
-                                    "cmd",
-                                    "capslock",
-                                    "numlock",
-                                    "scrolllock",
-                                    "printscreen",
-                                    "pause",
-                                ];
-                                if modifier_keys.contains(&key) {
-                                    return;
-                                }
-
-                                if key.starts_with("f") && key.len() <= 3 {
-                                    if let Ok(_) = key[1..].parse::<u8>() {
-                                        return;
+                                match key {
+                                    "backspace" => this.backspace(&Backspace, window, cx),
+                                    "delete" => this.delete(&Delete, window, cx),
+                                    "left" => this.left(&Left, window, cx),
+                                    "right" => this.right(&Right, window, cx),
+                                    "home" => this.home(&Home, window, cx),
+                                    "end" => this.end(&End, window, cx),
+                                    "enter" => {
+                                        // Enter is handled by the connect view, not here.
+                                        // Let it propagate.
                                     }
-                                }
-
-                                if key == "backspace" {
-                                    this.backspace(&Backspace, window, cx);
-                                    return;
-                                }
-
-                                if key == "delete" {
-                                    this.delete(&Delete, window, cx);
-                                    return;
-                                }
-
-                                let nav_keys = [
-                                    "left", "right", "up", "down", "home", "end", "pageup",
-                                    "pagedown", "insert", "escape", "tab",
-                                ];
-                                if nav_keys.contains(&key) {
-                                    return;
-                                }
-
-                                if let Some(key_char) = &event.keystroke.key_char {
-                                    if key_char.chars().all(|c| c.is_control()) {
-                                        return;
-                                    }
-
-                                    if !event.keystroke.modifiers.control
-                                        && !event.keystroke.modifiers.alt
-                                        && !event.keystroke.modifiers.platform
-                                    {
-                                        this.replace_text_in_range(None, key_char, window, cx);
-                                    }
+                                    _ => {}
                                 }
                             },
                         ))
@@ -658,10 +614,10 @@ impl Render for TextInput {
 
 struct TextLineElement {
     input: Entity<TextInput>,
-    text_color: Rgba,
-    placeholder_color: Rgba,
-    selection_color: Rgba,
-    caret_color: Rgba,
+    text_color: Hsla,
+    placeholder_color: Hsla,
+    selection_color: Hsla,
+    caret_color: Hsla,
     font_size: Pixels,
     show_placeholder: bool,
 }
@@ -736,7 +692,7 @@ impl Element for TextLineElement {
         let run = TextRun {
             len: display_text.len(),
             font: style.font(),
-            color: run_color.into(),
+            color: run_color,
             background_color: None,
             underline: None,
             strikethrough: None,

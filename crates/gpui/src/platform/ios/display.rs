@@ -3,12 +3,12 @@
 //! On iOS, UIScreen represents the device's display. Unlike macOS, iOS devices
 //! typically have a single built-in display, though external displays are possible.
 
-use crate::{Bounds, DisplayId, Pixels, PlatformDisplay, px, size};
-use anyhow::{Result, anyhow};
+use crate::{px, size, Bounds, DisplayId, Pixels, PlatformDisplay};
+use anyhow::Result;
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use uuid::Uuid;
 
-use super::{CGRect, CGSize};
+use super::CGRect;
 
 /// Wrapper around UIScreen for iOS display handling.
 #[derive(Debug)]

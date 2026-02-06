@@ -15,7 +15,6 @@ use futures::channel::oneshot;
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use parking_lot::Mutex;
 use std::{
-    cell::RefCell,
     ffi::c_void,
     path::{Path, PathBuf},
     rc::Rc,
@@ -369,6 +368,21 @@ impl Platform for IosPlatform {
         self.background_executor().spawn(async move {
             Err(anyhow!("Keychain delete_credentials not yet implemented for iOS"))
         })
+    }
+
+    fn is_screen_capture_supported(&self) -> bool {
+        // Screen capture is not supported on iOS in the same way as desktop platforms.
+        // iOS uses ReplayKit which has different privacy/permission requirements.
+        false
+    }
+
+    fn screen_capture_sources(
+        &self,
+    ) -> oneshot::Receiver<Result<Vec<Rc<dyn crate::ScreenCaptureSource>>>> {
+        let (tx, rx) = oneshot::channel();
+        tx.send(Err(anyhow!("Screen capture not supported on iOS")))
+            .ok();
+        rx
     }
 }
 

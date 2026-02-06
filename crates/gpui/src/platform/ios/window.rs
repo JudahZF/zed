@@ -5,20 +5,20 @@
 //! with the Metal renderer shared with macOS.
 
 use super::{
-    BoolExt, CGPoint, CGRect, CGSize, UIEdgeInsets,
     events::{
-        UIKeyModifierFlags, ios_keyboard_log, translate_key_press, translate_modifiers_changed,
-        translate_pan_to_scroll, translate_touch_to_mouse,
+        ios_keyboard_log, translate_key_press, translate_modifiers_changed,
+        translate_pan_to_scroll, translate_touch_to_mouse, UIKeyModifierFlags,
     },
     metal_renderer::MetalRenderer,
+    CGPoint, CGRect, CGSize, UIEdgeInsets,
 };
 use super::metal_atlas::MetalAtlas;
 use crate::{
-    AnyWindowHandle, Bounds, Capslock, DispatchEventResult, GpuSpecs, Modifiers, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformWindow, Point, PromptButton,
-    PromptLevel, RequestFrameOptions, ScaledPixels, Scene, Size, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams, point, px, size,
-    platform::PlatformInputHandler,
+    platform::PlatformInputHandler, point, px, size, AnyWindowHandle, Bounds, Capslock,
+    DevicePixels, DispatchEventResult, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformInput, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, Scene,
+    Size, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowParams,
 };
 use futures::channel::oneshot;
 use objc::{
@@ -34,7 +34,6 @@ use raw_window_handle::{
     UiKitDisplayHandle, UiKitWindowHandle,
 };
 use std::{
-    cell::RefCell,
     ffi::c_void,
     ptr,
     ptr::NonNull,
@@ -132,6 +131,12 @@ unsafe fn register_view_class() -> &'static Class {
         has_text as extern "C" fn(&Object, Sel) -> BOOL,
     );
 
+    // Pan gesture handler (for scroll)
+    decl.add_method(
+        sel!(handlePan:),
+        handle_pan as extern "C" fn(&Object, Sel, *mut Object),
+    );
+
     // Layout
     decl.add_method(
         sel!(layoutSubviews),
@@ -207,11 +212,19 @@ extern "C" fn touches_cancelled(this: &Object, _sel: Sel, touches: *mut Object, 
     handle_touches(this, touches, "cancelled");
 }
 
-fn handle_touches(view: &Object, touches: *mut Object, _phase: &str) {
+fn handle_touches(view: &Object, touches: *mut Object, phase: &str) {
     unsafe {
+        log::debug!("[iOS Touch] handle_touches phase={}", phase);
         let Some(state) = get_window_state(view) else {
+            log::warn!("[iOS Touch] get_window_state returned None - touches will be dropped");
             return;
         };
+
+        // Touch coordinates from locationInView: are in the full-screen view's
+        // coordinate system, but the renderer layer is offset by the safe area
+        // insets. Subtract the insets so touch positions align with GPUI layout.
+        let insets: UIEdgeInsets = msg_send![view, safeAreaInsets];
+        let safe_area_offset = point(px(insets.left as f32), px(insets.top as f32));
 
         let count: usize = msg_send![touches, count];
         let all_objects: *mut Object = msg_send![touches, allObjects];
@@ -224,8 +237,57 @@ fn handle_touches(view: &Object, touches: *mut Object, _phase: &str) {
                 view as *const Object as *mut Object,
                 state.modifiers.lock().clone(),
             ) {
+                let event = offset_event_position(event, safe_area_offset);
+                log::debug!("[iOS Touch] dispatching event: {:?}", event);
                 dispatch_event(&state, event);
             }
+        }
+    }
+}
+
+/// Adjust a mouse event's position by subtracting a safe area offset,
+/// so that touch coordinates (in the full-screen view) align with the
+/// GPUI layout (which starts at the safe area origin).
+fn offset_event_position(event: PlatformInput, offset: Point<Pixels>) -> PlatformInput {
+    let adjust = |pos: Point<Pixels>| point(pos.x - offset.x, pos.y - offset.y);
+
+    match event {
+        PlatformInput::MouseDown(mut e) => {
+            e.position = adjust(e.position);
+            PlatformInput::MouseDown(e)
+        }
+        PlatformInput::MouseMove(mut e) => {
+            e.position = adjust(e.position);
+            PlatformInput::MouseMove(e)
+        }
+        PlatformInput::MouseUp(mut e) => {
+            e.position = adjust(e.position);
+            PlatformInput::MouseUp(e)
+        }
+        PlatformInput::ScrollWheel(mut e) => {
+            e.position = adjust(e.position);
+            PlatformInput::ScrollWheel(e)
+        }
+        other => other,
+    }
+}
+
+extern "C" fn handle_pan(this: &Object, _sel: Sel, gesture: *mut Object) {
+    unsafe {
+        let Some(state) = get_window_state(this) else {
+            return;
+        };
+
+        let insets: UIEdgeInsets = msg_send![this, safeAreaInsets];
+        let safe_area_offset = point(px(insets.left as f32), px(insets.top as f32));
+
+        if let Some(event) = translate_pan_to_scroll(
+            gesture,
+            this as *const Object as *mut Object,
+            Modifiers::default(),
+        ) {
+            let event = offset_event_position(event, safe_area_offset);
+            dispatch_event(&state, event);
         }
     }
 }
@@ -314,7 +376,12 @@ fn handle_presses(view: &Object, presses: *mut Object, is_key_down: bool) {
             // Check if this is a repeat - key may be null for non-keyboard presses
             let key: *mut Object = msg_send![press, key];
             let is_repeat: bool = if !key.is_null() {
-                msg_send![press, isRepeating]
+                let responds: bool = msg_send![press, respondsToSelector: sel!(isRepeating)];
+                if responds {
+                    msg_send![press, isRepeating]
+                } else {
+                    false
+                }
             } else {
                 ios_keyboard_log("handle_presses: key is null (not a keyboard press?)");
                 false
@@ -338,8 +405,45 @@ fn handle_presses(view: &Object, presses: *mut Object, is_key_down: bool) {
 
             // Translate the key press - this should not panic now with all the null checks
             if let Some(event) = translate_key_press(press, is_key_down, is_repeat) {
+                // Extract the character for potential text insertion fallback.
+                // On macOS, when GPUI's keybinding dispatch doesn't handle a keystroke,
+                // the platform forwards it to the IME which calls insertText: to insert
+                // the character. On iOS we don't call [super pressesBegan:] (which would
+                // trigger UIKit's text input machinery), so we must do this manually.
+                let char_to_insert = if is_key_down {
+                    if let PlatformInput::KeyDown(ref key_down) = event {
+                        let mods = &key_down.keystroke.modifiers;
+                        // Only insert text for unmodified or shift-only keystrokes.
+                        // Command, Control, and Option indicate shortcut-like keystrokes
+                        // that should not produce text even if unhandled.
+                        if !mods.control && !mods.platform && !mods.alt {
+                            key_down.keystroke.key_char.clone()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 ios_keyboard_log(&format!("Dispatching key event for press {}", i + 1));
-                dispatch_event(&state, event);
+                let result = dispatch_event(&state, event);
+
+                // If GPUI didn't handle the keystroke (no matching keybinding/action)
+                // and we have a printable character, insert it via the input handler.
+                if result.propagate {
+                    if let Some(text) = char_to_insert {
+                        ios_keyboard_log(&format!(
+                            "Key not handled by GPUI, inserting text: '{}'",
+                            text
+                        ));
+                        with_input_handler(&state, |input_handler| {
+                            input_handler.replace_text_in_range(None, &text);
+                        });
+                    }
+                }
             } else {
                 ios_keyboard_log(&format!("No event generated for press {}", i + 1));
             }
@@ -442,7 +546,11 @@ extern "C" fn has_text(this: &Object, _sel: Sel) -> BOOL {
         })
         .unwrap_or(false);
 
-        if has { YES } else { NO }
+        if has {
+            YES
+        } else {
+            NO
+        }
     }
 }
 
@@ -473,30 +581,49 @@ extern "C" fn layout_subviews(this: &Object, _sel: Sel) {
             return;
         };
 
-        // Update Metal layer size - we need to update the renderer's layer, not the view's layer
         let bounds: CGRect = msg_send![this, bounds];
         let scale: f64 = msg_send![this, contentScaleFactor];
+        let insets: UIEdgeInsets = msg_send![this, safeAreaInsets];
 
-        // Update renderer's layer frame and drawable size
+        // Position the renderer layer within the safe area so content doesn't
+        // overlap the iOS status bar or home indicator area.
+        let safe_frame = CGRect {
+            origin: CGPoint {
+                x: insets.left,
+                y: insets.top,
+            },
+            size: CGSize {
+                width: bounds.size.width - insets.left - insets.right,
+                height: bounds.size.height - insets.top - insets.bottom,
+            },
+        };
+
         {
-            let renderer = state.renderer.lock();
+            let mut renderer = state.renderer.lock();
             let renderer_layer = renderer.layer_ptr();
-            let _: () = msg_send![renderer_layer, setFrame: bounds];
+            let _: () = msg_send![renderer_layer, setFrame: safe_frame];
             let _: () = msg_send![renderer_layer, setContentsScale: scale];
             let drawable_size = CGSize {
-                width: bounds.size.width * scale,
-                height: bounds.size.height * scale,
+                width: safe_frame.size.width * scale,
+                height: safe_frame.size.height * scale,
             };
             let _: () = msg_send![renderer_layer, setDrawableSize: drawable_size];
+
+            renderer.update_drawable_size(Size {
+                width: DevicePixels((safe_frame.size.width * scale) as i32),
+                height: DevicePixels((safe_frame.size.height * scale) as i32),
+            });
         }
 
-        // Update scale factor in state
         *state.scale_factor.lock() = scale as f32;
 
-        // Notify of resize
+        // Notify resize with the safe area dimensions (matches content_size())
         if let Some(callback) = state.resize_callback.lock().as_mut() {
             callback(
-                size(px(bounds.size.width as f32), px(bounds.size.height as f32)),
+                size(
+                    px(safe_frame.size.width as f32),
+                    px(safe_frame.size.height as f32),
+                ),
                 scale as f32,
             );
         }
@@ -564,14 +691,17 @@ extern "C" fn safe_area_insets_did_change(this: &Object, _sel: Sel) {
         };
 
         if let Some(callback) = state.resize_callback.lock().as_mut() {
-            // Obtain the current view size in points and convert to pixels.
+            // Pass the safe area dimensions (matching content_size())
             let view: *mut Object = msg_send![this, view];
             if !view.is_null() {
                 let bounds: CGRect = msg_send![view, bounds];
-                let bounds_size = bounds.size;
+                let insets: UIEdgeInsets = msg_send![view, safeAreaInsets];
                 let scale = *state.scale_factor.lock();
                 callback(
-                    size(px(bounds_size.width as f32), px(bounds_size.height as f32)),
+                    size(
+                        px((bounds.size.width - insets.left - insets.right) as f32),
+                        px((bounds.size.height - insets.top - insets.bottom) as f32),
+                    ),
                     scale,
                 );
             }
@@ -604,15 +734,19 @@ unsafe fn get_window_state(obj: &Object) -> Option<Arc<WindowState>> {
     let weak = &*(weak_ptr as *const Weak<WindowState>);
     weak.upgrade()
 }
-
-fn dispatch_event(state: &WindowState, event: PlatformInput) {
+fn dispatch_event(state: &WindowState, event: PlatformInput) -> DispatchEventResult {
     if let Some(callback) = state.input_callback.lock().as_mut() {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            callback(event);
-        }));
-        if let Err(e) = result {
-            log::error!("Panic in dispatch_event: {:?}", e);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
+        match result {
+            Ok(result) => result,
+            Err(e) => {
+                log::error!("Panic in dispatch_event: {:?}", e);
+                DispatchEventResult::default()
+            }
         }
+    } else {
+        log::warn!("[iOS] dispatch_event: input_callback is None, dropping event");
+        DispatchEventResult::default()
     }
 }
 
@@ -731,6 +865,16 @@ impl IosWindow {
                 height: screen_bounds.size.height * scale,
             };
             let _: () = msg_send![renderer_layer, setDrawableSize: drawable_size];
+
+            // Add a two-finger pan gesture recognizer for scrolling.
+            // Single-finger touches are handled by touchesBegan/Moved/Ended as clicks.
+            // Two-finger pan translates to scroll wheel events for the editor.
+            let pan_gesture: *mut Object = msg_send![class!(UIPanGestureRecognizer), alloc];
+            let pan_gesture: *mut Object =
+                msg_send![pan_gesture, initWithTarget: view action: sel!(handlePan:)];
+            let _: () = msg_send![pan_gesture, setMinimumNumberOfTouches: 2usize];
+            let _: () = msg_send![pan_gesture, setMaximumNumberOfTouches: 2usize];
+            let _: () = msg_send![view, addGestureRecognizer: pan_gesture];
 
             // Create the window state
             let state = Arc::new(WindowState {
@@ -899,6 +1043,11 @@ impl PlatformWindow for IosWindow {
 
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
         *self.state.input_handler.lock() = Some(input_handler);
+        // Ensure the view is first responder so iOS routes keyboard events to it.
+        // The view may have lost first responder status during view transitions.
+        unsafe {
+            let _: () = msg_send![self.view, becomeFirstResponder];
+        }
     }
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {

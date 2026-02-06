@@ -11,8 +11,9 @@ use askpass::EncryptedPassword;
 use futures::channel::oneshot;
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Task, Window,
-    div, prelude::*, px, rgb, rgba,
+    div, prelude::*, px,
 };
+use theme::ActiveTheme;
 use http_client::HttpClient;
 use remote::{RemoteClient, RemoteConnectionOptions, SshConnectionOptions};
 use std::sync::Arc;
@@ -354,11 +355,12 @@ impl ConnectView {
         cx.notify();
     }
 
-    fn render_header(&self, _cx: &App) -> impl IntoElement {
-        let accent_color = rgb(0x89b4fa);
-        let bg_color = rgb(0x1e1e2e);
-        let text_color = rgb(0xcdd6f4);
-        let muted_color = rgb(0xa6adc8);
+    fn render_header(&self, cx: &App) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let accent_color = colors.text_accent;
+        let bg_color = colors.background;
+        let text_color = colors.text;
+        let muted_color = colors.text_muted;
 
         div()
             .flex()
@@ -403,7 +405,7 @@ impl ConnectView {
             .flex_col()
             .gap(px(12.0))
             .w_full()
-            .max_w(px(400.0))
+            .max_w(px(540.0))
             .child(self.hostname_input.clone())
             .child(
                 div()
@@ -415,10 +417,10 @@ impl ConnectView {
             .child(self.remote_path_input.clone())
     }
 
-    fn render_status_message(&self, _cx: &App) -> impl IntoElement {
-        let error_color = rgb(0xf38ba8);
-        let muted_color = rgb(0xa6adc8);
-        let success_color = rgb(0xa6e3a1);
+    fn render_status_message(&self, cx: &App) -> impl IntoElement {
+        let error_color = cx.theme().status().error;
+        let muted_color = cx.theme().colors().text_muted;
+        let success_color = cx.theme().status().success;
 
         // Determine what message to show
         let message_and_color = match &self.state {
@@ -444,20 +446,21 @@ impl ConnectView {
     }
 
     fn render_password_prompt(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let surface_color = rgb(0x313244);
-        let text_color = rgb(0xcdd6f4);
-        let button_color = rgb(0x89b4fa);
-        let button_hover = rgb(0xa6c8ff);
-        let bg_color = rgb(0x1e1e2e);
+        let colors = cx.theme().colors();
+        let surface_color = colors.elevated_surface_background;
+        let text_color = colors.text;
+        let button_color = colors.text_accent;
+        let button_hover = colors.element_hover;
+        let bg_color = colors.background;
 
         match &self.state {
             ConnectionState::WaitingForPassword(prompt) => div()
                 .flex()
                 .flex_col()
                 .gap(px(16.0))
-                .w_full()
-                .max_w(px(400.0))
-                .p(px(20.0))
+            .w_full()
+            .max_w(px(540.0))
+            .p(px(20.0))
                 .rounded(px(12.0))
                 .bg(surface_color)
                 .child(
@@ -494,12 +497,13 @@ impl ConnectView {
     }
 
     fn render_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let button_color = rgb(0x89b4fa);
-        let button_hover = rgb(0xa6c8ff);
-        let secondary_color = rgb(0x45475a);
-        let secondary_hover = rgb(0x585b70);
-        let text_color = rgb(0xcdd6f4);
-        let bg_color = rgb(0x1e1e2e);
+        let colors = cx.theme().colors();
+        let button_color = colors.text_accent;
+        let button_hover = colors.element_hover;
+        let secondary_color = colors.element_background;
+        let secondary_hover = colors.element_hover;
+        let text_color = colors.text;
+        let bg_color = colors.background;
 
         let is_busy = matches!(
             self.state,
@@ -511,7 +515,7 @@ impl ConnectView {
             .flex_col()
             .gap(px(12.0))
             .w_full()
-            .max_w(px(400.0))
+            .max_w(px(540.0))
             .child(
                 div()
                     .id("connect-button")
@@ -565,10 +569,11 @@ impl ConnectView {
     }
 
     fn render_recent_connections(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let surface_color = rgb(0x313244);
-        let text_color = rgb(0xcdd6f4);
-        let muted_color = rgb(0xa6adc8);
-        let hover_color = rgb(0x45475a);
+        let colors = cx.theme().colors();
+        let surface_color = colors.element_background;
+        let text_color = colors.text;
+        let muted_color = colors.text_muted;
+        let hover_color = colors.element_hover;
 
         let has_recent = !self.recent_connections.is_empty();
 
@@ -577,7 +582,7 @@ impl ConnectView {
             .flex_col()
             .gap(px(8.0))
             .w_full()
-            .max_w(px(400.0))
+            .max_w(px(540.0))
             .mt(px(24.0))
             .when(has_recent, |el| {
                 el.child(
@@ -630,7 +635,7 @@ impl Focusable for ConnectView {
 
 impl Render for ConnectView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let bg_color = rgb(0x1e1e2e);
+        let bg_color = cx.theme().colors().background;
         let is_password_prompt = matches!(self.state, ConnectionState::WaitingForPassword(_));
 
         div()
@@ -651,6 +656,7 @@ impl Render for ConnectView {
                     .gap(px(24.0))
                     .py(px(48.0))
                     .w_full()
+                    .max_w(px(540.0))
                     .child(self.render_header(cx))
                     .when(!is_password_prompt, |el| {
                         el.child(self.render_connection_form(cx))
@@ -670,7 +676,7 @@ impl Render for ConnectView {
                     .mb(px(8.0))
                     .text_center()
                     .text_size(px(12.0))
-                    .text_color(rgba(0xffffff40))
+                    .text_color(cx.theme().colors().text_muted)
                     .child("Zed for iPad - Preview"),
             )
     }
