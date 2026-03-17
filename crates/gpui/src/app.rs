@@ -51,7 +51,7 @@ use crate::{
     SharedString, SubscriberSet, Subscription, SvgRenderer, Task, TextRenderingMode, TextSystem,
     ThermalState, Window, WindowAppearance, WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
-    current_platform, hash, init_app_menus, observe_ios_lifecycle,
+    hash, init_app_menus, observe_ios_lifecycle,
 };
 
 mod async_context;
