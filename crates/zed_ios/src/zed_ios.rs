@@ -21,7 +21,7 @@ use anyhow::Result;
 use client::{Client, UserStore};
 use db::kvp::{GLOBAL_KEY_VALUE_STORE, KEY_VALUE_STORE};
 use fs::{Fs, RealFs};
-use gpui::{App, AppContext as _, Application, WindowOptions};
+use gpui::{App, AppContext as _, WindowOptions};
 use language::LanguageRegistry;
 use log::info;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
@@ -116,14 +116,14 @@ async fn installation_id() -> anyhow::Result<IdType> {
 }
 
 fn init_ios_telemetry(client: &Arc<Client>, session: &Session, cx: &mut App) {
-    let system_id = match cx.background_executor().block(system_id()) {
+    let system_id = match cx.foreground_executor().block_on(system_id()) {
         Ok(system_id) => Some(system_id),
         Err(err) => {
             log::warn!("Failed to load iOS telemetry system_id: {err:#}");
             None
         }
     };
-    let installation_id = match cx.background_executor().block(installation_id()) {
+    let installation_id = match cx.foreground_executor().block_on(installation_id()) {
         Ok(installation_id) => Some(installation_id),
         Err(err) => {
             log::warn!("Failed to load iOS telemetry installation_id: {err:#}");
@@ -185,8 +185,8 @@ fn init_app_state(cx: &mut App) -> anyhow::Result<Arc<AppState>> {
     let node_runtime = NodeRuntime::new(client.http_client(), None, node_options_rx);
 
     let session = cx
-        .background_executor()
-        .block(async move { Session::new(Uuid::new_v4().to_string()).await });
+        .foreground_executor()
+        .block_on(async move { Session::new(Uuid::new_v4().to_string()).await });
     init_ios_telemetry(&client, &session, cx);
     let app_session = cx.new(|cx| AppSession::new(session, cx));
     let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
@@ -219,7 +219,7 @@ fn init_app_state(cx: &mut App) -> anyhow::Result<Arc<AppState>> {
             HashMap::default()
         }
     };
-    trusted_worktrees::init(db_trusted_paths, None, None, cx);
+    trusted_worktrees::init(db_trusted_paths, cx);
 
     AppState::set_global(Arc::downgrade(&app_state), cx);
     Project::init(&client, cx);
@@ -289,7 +289,7 @@ impl ZedIosApp {
 
         // Initialize the core workspace stack for remote projects
         let app_state = init_app_state(cx)?;
-        language_model::init(app_state.client.clone(), cx);
+        language_model::init(app_state.user_store.clone(), app_state.client.clone(), cx);
         language_models::init(app_state.user_store.clone(), app_state.client.clone(), cx);
         prompt_store::init(cx);
         acp_tools::init(cx);
@@ -361,7 +361,7 @@ pub extern "C" fn zed_ios_init() {
     }
 
     info!("Creating Application...");
-    Application::new().with_assets(assets::Assets).run(|cx| {
+    gpui_platform::application().with_assets(assets::Assets).run(|cx| {
         info!("Application::run callback executing");
         if let Err(e) = ZedIosApp::init(cx) {
             log::error!("Failed to initialize Zed iOS: {}", e);

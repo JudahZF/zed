@@ -31,7 +31,7 @@ use std::{
     sync::Arc,
 };
 
-pub(crate) struct IosPlatform(Mutex<IosPlatformState>);
+pub struct IosPlatform(Mutex<IosPlatformState>);
 
 struct IosPlatformState {
     background_executor: BackgroundExecutor,

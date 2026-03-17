@@ -73,7 +73,7 @@ pub use keyboard::*;
 pub use keystroke::*;
 
 #[cfg(target_os = "ios")]
-pub(crate) use ios::*;
+pub use ios::*;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use test::*;
 

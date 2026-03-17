@@ -436,26 +436,17 @@ impl ConnectView {
 
         let connection_task = cx.spawn(async move |this, cx| {
             let known_password = if should_read_keychain {
-                match cx.update(|cx| cx.read_credentials(&credential_store_url_for_task)) {
-                    Ok(task) => match task.await {
-                        Ok(Some((_stored_username, secret_bytes))) => {
-                            String::from_utf8(secret_bytes).ok().and_then(|secret| {
-                                EncryptedPassword::try_from(secret.as_str()).ok()
-                            })
-                        }
-                        Ok(None) => None,
-                        Err(err) => {
-                            log::warn!(
-                                "[Zed iOS] Failed to read saved credentials for {}: {}",
-                                credential_store_url_for_task,
-                                err
-                            );
-                            None
-                        }
-                    },
+                match cx
+                    .update(|cx| cx.read_credentials(&credential_store_url_for_task))
+                    .await
+                {
+                    Ok(Some((_stored_username, secret_bytes))) => String::from_utf8(secret_bytes)
+                        .ok()
+                        .and_then(|secret| EncryptedPassword::try_from(secret.as_str()).ok()),
+                    Ok(None) => None,
                     Err(err) => {
                         log::warn!(
-                            "[Zed iOS] Unable to access credential store for {}: {}",
+                            "[Zed iOS] Failed to read saved credentials for {}: {}",
                             credential_store_url_for_task,
                             err
                         );
@@ -585,7 +576,7 @@ impl ConnectView {
         let identifier = ConnectionIdentifier::setup();
 
         let client_task =
-            cx.update(|cx| RemoteClient::new(identifier, connection, cancel_rx, delegate, cx))?;
+            cx.update(|cx| RemoteClient::new(identifier, connection, cancel_rx, delegate, cx));
 
         // Await the client task while keeping cancel_tx alive
         let client = client_task.await?;

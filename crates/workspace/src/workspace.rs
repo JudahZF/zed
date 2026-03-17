@@ -6492,7 +6492,7 @@ impl Workspace {
                             toolchain,
                             cx,
                         )
-                    })?
+                    })
                     .await;
             }
 

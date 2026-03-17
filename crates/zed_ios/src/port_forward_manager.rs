@@ -1,9 +1,8 @@
 use anyhow::{Context as _, Result, anyhow};
 use gpui::{Context, Entity};
 use remote::{RemoteClient, SshPortForwardOption};
-use smol::process::Child;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
-use util::command::new_smol_command;
+use util::command::{Child, new_command};
 
 use crate::persistence::ConnectionDb;
 
@@ -136,8 +135,8 @@ impl PortForwardManager {
                     })
                     .collect::<Vec<_>>();
                 let command = remote_client
-                    .read_with(cx, |client, _| client.build_forward_ports_command(tuples))??;
-                let child = new_smol_command(command.program)
+                    .read_with(cx, |client, _| client.build_forward_ports_command(tuples))?;
+                let child = new_command(command.program)
                     .args(command.args)
                     .envs(command.env)
                     .spawn()

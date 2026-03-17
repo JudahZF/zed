@@ -140,26 +140,14 @@ impl WorkspaceView {
         cx.spawn(async move |this, cx| {
             // Ensure the requested worktrees exist before asking the shared workspace
             // layer to restore its serialized state for these remote roots.
-            let add_tasks = match cx.update(|cx| {
+            let add_tasks = cx.update(|cx| {
                 project.update(cx, |project, cx| {
                     paths
                         .iter()
                         .map(|path| project.find_or_create_worktree(path, true, cx))
                         .collect::<Vec<_>>()
                 })
-            }) {
-                Ok(tasks) => tasks,
-                Err(err) => {
-                    this.update(cx, |this, cx| {
-                        log::error!("[Zed iOS] Failed to queue remote worktree creation: {err:#}");
-                        this.load_state =
-                            WorkspaceLoadState::Error(format!("Failed to open project: {err:#}"));
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-            };
+            });
 
             let mut canonical_paths = Vec::with_capacity(add_tasks.len());
             for task in add_tasks {
@@ -177,27 +165,13 @@ impl WorkspaceView {
                     }
                 };
 
-                let canonical_path = match worktree.read_with(cx, |worktree, _| {
+                let canonical_path = worktree.read_with(cx, |worktree, _| {
                     if relative_path.is_empty() {
                         worktree.abs_path().as_ref().to_path_buf()
                     } else {
                         worktree.absolutize(&relative_path)
                     }
-                }) {
-                    Ok(path) => path,
-                    Err(err) => {
-                        this.update(cx, |this, cx| {
-                            log::error!(
-                                "[Zed iOS] Failed to resolve canonical remote path: {err:#}"
-                            );
-                            this.load_state =
-                                WorkspaceLoadState::Error(format!("Failed to open project: {err:#}"));
-                            cx.notify();
-                        })
-                        .ok();
-                        return;
-                    }
-                };
+                });
 
                 canonical_paths.push(canonical_path);
             }
