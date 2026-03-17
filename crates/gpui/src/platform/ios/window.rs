@@ -2,30 +2,29 @@
 //!
 //! This module provides a UIWindow with a custom UIView that hosts a CAMetalLayer
 //! for GPU rendering. It handles touch input, keyboard events, and integrates
-//! with the Metal renderer shared with macOS.
+//! with a native Metal renderer.
 
 use super::{
-    events::{
-        ios_keyboard_log, translate_key_press, translate_modifiers_changed,
-        translate_pan_to_scroll, translate_touch_to_mouse, UIKeyModifierFlags,
-    },
-    metal_renderer::MetalRenderer,
     CGPoint, CGRect, CGSize, UIEdgeInsets,
+    events::{
+        UIKeyModifierFlags, ios_keyboard_log, translate_key_press, translate_modifiers_changed,
+        translate_pan_to_scroll, translate_touch_to_mouse,
+    },
+    renderer::{Context as RendererContext, Renderer},
 };
 use super::metal_atlas::MetalAtlas;
 use crate::{
-    platform::PlatformInputHandler, point, px, size, AnyWindowHandle, Bounds, Capslock,
-    DevicePixels, DispatchEventResult, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformInput, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, Scene,
-    Size, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowParams,
+    AnyWindowHandle, Bounds, Capslock, DevicePixels, DispatchEventResult, GpuSpecs, Modifiers,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, Scene, Size, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowParams, platform::PlatformInputHandler, point, px, size,
 };
 use futures::channel::oneshot;
 use objc::{
     class,
     declare::ClassDecl,
     msg_send,
-    runtime::{Class, Object, Protocol, Sel, BOOL, NO, YES},
+    runtime::{BOOL, Class, NO, Object, Protocol, Sel, YES},
     sel, sel_impl,
 };
 use parking_lot::Mutex;
@@ -42,7 +41,6 @@ use std::{
 };
 
 use super::IosDisplay;
-use super::metal_renderer::InstanceBufferPool;
 
 const WINDOW_STATE_IVAR: &str = "windowState";
 
@@ -507,6 +505,34 @@ extern "C" fn delete_backward(this: &Object, _sel: Sel) {
             return;
         };
 
+        // Mirror insertText behavior: if an input handler is active, mutate text directly.
+        // Backspace must provide an explicit replacement range or some handlers (like Editor)
+        // treat an empty replacement with no range as a no-op.
+        let handled = with_input_handler(&state, |input_handler| {
+            if let Some(marked_range) = input_handler.marked_text_range() {
+                input_handler.replace_text_in_range(Some(marked_range), "");
+                return;
+            }
+
+            if let Some(selection) = input_handler.selected_text_range(false) {
+                let replacement_range = if !selection.range.is_empty() {
+                    selection.range
+                } else if selection.range.start > 0 {
+                    (selection.range.start - 1)..selection.range.start
+                } else {
+                    selection.range.start..selection.range.start
+                };
+                input_handler.replace_text_in_range(Some(replacement_range), "");
+            } else {
+                input_handler.replace_text_in_range(None, "");
+            }
+        })
+        .is_some();
+
+        if handled {
+            return;
+        }
+
         let keystroke = crate::Keystroke {
             key: "backspace".into(),
             modifiers: Modifiers::default(),
@@ -546,11 +572,7 @@ extern "C" fn has_text(this: &Object, _sel: Sel) -> BOOL {
         })
         .unwrap_or(false);
 
-        if has {
-            YES
-        } else {
-            NO
-        }
+        if has { YES } else { NO }
     }
 }
 
@@ -753,7 +775,7 @@ fn dispatch_event(state: &WindowState, event: PlatformInput) -> DispatchEventRes
 /// Internal window state shared between Rust and Objective-C callbacks.
 struct WindowState {
     handle: AnyWindowHandle,
-    renderer: Mutex<MetalRenderer>,
+    renderer: Mutex<Renderer>,
     input_callback: Mutex<Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>>,
     request_frame_callback: Mutex<Option<Box<dyn FnMut(RequestFrameOptions)>>>,
     resize_callback: Mutex<Option<Box<dyn FnMut(Size<Pixels>, f32)>>>,
@@ -823,7 +845,7 @@ impl IosWindow {
     pub fn new(
         handle: AnyWindowHandle,
         _params: WindowParams,
-        renderer_context: Arc<Mutex<InstanceBufferPool>>,
+        renderer_context: RendererContext,
     ) -> anyhow::Result<Self> {
         ensure_classes_registered();
         ensure_display_link_class_registered();
@@ -848,7 +870,18 @@ impl IosWindow {
             let view: *mut Object = msg_send![view_class, alloc];
             let view: *mut Object = msg_send![view, initWithFrame: screen_bounds];
 
-            let renderer = MetalRenderer::new(renderer_context);
+            // Create the Metal renderer - this will render into the view's CAMetalLayer
+            let bounds = crate::Size {
+                width: (screen_bounds.size.width * scale) as f32,
+                height: (screen_bounds.size.height * scale) as f32,
+            };
+            let renderer = super::renderer::new_renderer(
+                renderer_context,
+                ui_window as *mut c_void,
+                view as *mut c_void,
+                bounds,
+                false, // not transparent
+            );
             let view_layer: *mut Object = msg_send![view, layer];
             let renderer_layer = renderer.layer_ptr();
 

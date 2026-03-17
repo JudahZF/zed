@@ -12,7 +12,7 @@ mod dispatcher;
 mod display;
 mod events;
 pub mod ffi;
-pub mod metal_renderer;
+mod metal_renderer;
 mod platform;
 mod text_input;
 mod window;
@@ -21,11 +21,11 @@ mod window;
 #[cfg(feature = "font-kit")]
 mod text_system;
 
-// iOS-specific Metal renderer (adapted from macOS, no core_video dependency)
 #[path = "../mac/metal_atlas.rs"]
 mod metal_atlas;
 
-use metal_renderer as renderer;
+// iOS uses a native Metal renderer with simulator-safe clipping (no Blade dependency).
+use self::metal_renderer as renderer;
 
 // iOS-specific open_type module (adapted from macOS, local CGFloat)
 #[cfg(feature = "font-kit")]

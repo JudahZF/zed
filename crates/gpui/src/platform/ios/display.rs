@@ -3,7 +3,7 @@
 //! On iOS, UIScreen represents the device's display. Unlike macOS, iOS devices
 //! typically have a single built-in display, though external displays are possible.
 
-use crate::{px, size, Bounds, DisplayId, Pixels, PlatformDisplay};
+use crate::{Bounds, DisplayId, Pixels, PlatformDisplay, px, size};
 use anyhow::Result;
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use uuid::Uuid;

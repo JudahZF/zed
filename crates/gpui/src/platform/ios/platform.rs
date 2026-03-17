@@ -5,10 +5,11 @@
 
 use super::{IosDispatcher, IosDisplay, IosWindow, ns_string, renderer};
 use crate::{
-    Action, AnyWindowHandle, BackgroundExecutor, ClipboardEntry, ClipboardItem, ForegroundExecutor,
-    Keymap, Menu, MenuItem, PathPromptOptions, Platform, PlatformDisplay,
-    PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result, Task,
-    WindowAppearance, WindowParams, DummyKeyboardMapper,
+    Action, AnyWindowHandle, BackgroundExecutor, ClipboardEntry, ClipboardItem,
+    DummyKeyboardMapper, ForegroundExecutor, IosLifecycleEvent, Keymap, Menu, MenuItem,
+    PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PlatformWindow, Result, Subscription, Task, WindowAppearance,
+    WindowParams,
 };
 use anyhow::anyhow;
 use futures::channel::oneshot;
@@ -82,6 +83,10 @@ impl IosPlatform {
     fn renderer_context(&self) -> renderer::Context {
         self.0.lock().renderer_context.clone()
     }
+}
+
+pub fn observe_ios_lifecycle(callback: impl FnMut(IosLifecycleEvent) + 'static) -> Subscription {
+    super::ffi::observe_ios_lifecycle(callback)
 }
 
 impl Platform for IosPlatform {

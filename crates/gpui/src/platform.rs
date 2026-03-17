@@ -36,7 +36,7 @@ use crate::{
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Font, FontId, FontMetrics, FontRun,
     ForegroundExecutor, GlyphId, GpuSpecs, ImageSource, Keymap, LineLayout, Pixels, PlatformInput,
     Point, Priority, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene,
-    ShapedGlyph, ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task,
+    ShapedGlyph, ShapedRun, SharedString, Size, Subscription, SvgRenderer, SystemWindowTab, Task,
     ThreadTaskTimings, Window, WindowControlArea, hash, point, px, size,
 };
 use anyhow::Result;
@@ -82,6 +82,25 @@ pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream}
 
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
 pub use visual_test::VisualTestPlatform;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum IosLifecycleEvent {
+    DidBecomeActive,
+    WillResignActive,
+    DidEnterBackground,
+    WillEnterForeground,
+    WillTerminate,
+}
+
+#[cfg(target_os = "ios")]
+pub fn observe_ios_lifecycle(callback: impl FnMut(IosLifecycleEvent) + 'static) -> Subscription {
+    ios::observe_ios_lifecycle(callback)
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn observe_ios_lifecycle(_callback: impl FnMut(IosLifecycleEvent) + 'static) -> Subscription {
+    Subscription::new(|| {})
+}
 
 /// Return which compositor we're guessing we'll use.
 /// Does not attempt to connect to the given compositor.

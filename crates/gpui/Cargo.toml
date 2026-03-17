@@ -134,6 +134,7 @@ pathfinder_geometry = "0.5"
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))'.dependencies]
 scap = { workspace = true, optional = true }
 
+# iOS dependencies - native Metal renderer with iOS/simulator-safe clipping shaders
 [target.'cfg(target_os = "ios")'.dependencies]
 bitflags = { workspace = true }
 block = "0.1"
