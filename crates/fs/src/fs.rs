@@ -75,6 +75,10 @@ pub trait Watcher: Send + Sync {
     fn remove(&self, path: &Path) -> Result<()>;
 }
 
+#[cfg(target_os = "ios")]
+static IOS_WATCH_WARNING_EMITTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum PathEventKind {
     Removed,
@@ -1186,9 +1190,11 @@ impl Fs for RealFs {
     ) {
         // iOS is a remote-first client - file watching is handled on the remote machine.
         // Return an empty stream and a no-op watcher.
-        eprintln!(
-            "Warning: file watching is not supported on iOS; returning an empty stream and a no-op watcher."
-        );
+        if !IOS_WATCH_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "Warning: file watching is not supported on iOS; returning an empty stream and a no-op watcher."
+            );
+        }
         let watcher = Arc::new(RealWatcher {});
         (Box::pin(futures::stream::empty()), watcher)
     }

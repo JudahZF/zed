@@ -194,7 +194,10 @@ pub fn os_version() -> String {
         use objc2_foundation::NSProcessInfo;
         let process_info = NSProcessInfo::processInfo();
         let version = process_info.operatingSystemVersion();
-        format!("{}.{}.{}", version.majorVersion, version.minorVersion, version.patchVersion)
+        format!(
+            "{}.{}.{}",
+            version.majorVersion, version.minorVersion, version.patchVersion
+        )
     }
 }
 

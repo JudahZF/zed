@@ -6457,6 +6457,99 @@ impl Workspace {
         })
     }
 
+    pub fn restore_remote_project(
+        &mut self,
+        connection_options: RemoteConnectionOptions,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<Option<Result<Box<dyn ItemHandle>>>>>> {
+        let project = self.project.clone();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let (workspace_id, serialized_workspace) =
+                deserialize_remote_project(connection_options, paths.clone(), cx).await?;
+
+            let toolchains = DB.toolchains(workspace_id).await?;
+            for (toolchain, worktree_path, path) in toolchains {
+                project
+                    .update(cx, |this_project, cx| {
+                        let Some(worktree_id) = this_project
+                            .find_worktree(&worktree_path, cx)
+                            .and_then(|(worktree, rel_path)| {
+                                if rel_path.is_empty() {
+                                    Some(worktree.read(cx).id())
+                                } else {
+                                    None
+                                }
+                            })
+                        else {
+                            return Task::ready(None);
+                        };
+
+                        this_project.activate_toolchain(
+                            ProjectPath { worktree_id, path },
+                            toolchain,
+                            cx,
+                        )
+                    })?
+                    .await;
+            }
+
+            let mut project_paths_to_open = vec![];
+            let mut project_path_errors: Vec<anyhow::Error> = vec![];
+
+            for path in paths {
+                let result = cx
+                    .update(|_, cx| {
+                        Workspace::project_path_for_path(project.clone(), &path, true, cx)
+                    })?
+                    .await;
+                match result {
+                    Ok((_, project_path)) => {
+                        project_paths_to_open.push((path.clone(), Some(project_path)));
+                    }
+                    Err(error) => {
+                        project_path_errors.push(error);
+                    }
+                };
+            }
+
+            if project_paths_to_open.is_empty() {
+                return Err(project_path_errors.pop().context("no paths given")?);
+            }
+
+            this.update_in(cx, |this, window, cx| {
+                this.set_database_id(workspace_id);
+                if let Some(ref serialized) = serialized_workspace {
+                    this.centered_layout = serialized.centered_layout;
+                }
+                window.activate_window();
+                this.update_history(cx);
+            })?;
+
+            let items = this
+                .update_in(cx, |_, window, cx| {
+                    open_items(serialized_workspace, project_paths_to_open, window, cx)
+                })?
+                .await?;
+
+            this.update_in(cx, |workspace, _, cx| {
+                for error in project_path_errors {
+                    if error.error_code() == proto::ErrorCode::DevServerProjectPathDoesNotExist {
+                        if let Some(path) = error.error_tag("path") {
+                            workspace.show_error(&anyhow!("'{path}' does not exist"), cx)
+                        }
+                    } else {
+                        workspace.show_error(&error, cx)
+                    }
+                }
+            })?;
+
+            Ok(items)
+        })
+    }
+
     pub fn key_context(&self, cx: &App) -> KeyContext {
         let mut context = KeyContext::new_with_defaults();
         context.add("Workspace");
@@ -6496,7 +6589,6 @@ impl Workspace {
         context
     }
 
-    /// Multiworkspace uses this to add workspace action handling to itself
     pub fn actions(&self, div: Div, window: &mut Window, cx: &mut Context<Self>) -> Div {
         self.add_workspace_actions_listeners(div, window, cx)
             .on_action(cx.listener(

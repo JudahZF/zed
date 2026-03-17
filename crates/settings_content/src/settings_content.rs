@@ -5,6 +5,7 @@ mod fallible_options;
 mod language;
 mod language_model;
 pub mod merge_from;
+mod mobile;
 mod project;
 mod serde_helper;
 mod terminal;
@@ -18,6 +19,7 @@ pub use fallible_options::*;
 pub use language::*;
 pub use language_model::*;
 pub use merge_from::MergeFrom as MergeFromTrait;
+pub use mobile::*;
 pub use project::*;
 use serde::de::DeserializeOwned;
 pub use serde_helper::{
@@ -109,6 +111,9 @@ pub struct SettingsContent {
 
     pub agent: Option<AgentSettingsContent>,
     pub agent_servers: Option<AllAgentServersSettings>,
+
+    /// Configuration for mobile-first iPad surfaces.
+    pub mobile: Option<MobileSettingsContent>,
 
     /// Configuration of audio in Zed.
     pub audio: Option<AudioSettingsContent>,

@@ -199,6 +199,7 @@ impl VsCodeSettings {
             line_indicator_format: None,
             log: None,
             message_editor: None,
+            mobile: None,
             node: self.node_binary_settings(),
             notification_panel: None,
             outline_panel: self.outline_panel_settings_content(),
