@@ -120,6 +120,8 @@ Try `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer`
 
 If you're on macOS 26, try `xcodebuild -downloadComponent MetalToolchain`
 
+If you're working on the iOS app, `script/setup-ios-toolchain` will validate the same prerequisite and can download the Metal toolchain for you.
+
 ### Cargo errors claiming that a dependency is using unstable features
 
 Try `cargo clean` and `cargo build`.

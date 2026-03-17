@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+install_metal_toolchain=false
+if [[ "${1:-}" == "--install-metal-toolchain" ]]; then
+  install_metal_toolchain=true
+elif [[ $# -gt 0 ]]; then
+  echo "usage: script/setup-ios-toolchain [--install-metal-toolchain]" >&2
+  exit 2
+fi
+
+if ! command -v xcode-select >/dev/null 2>&1; then
+  echo "error: xcode-select is not available. Install Xcode first." >&2
+  exit 1
+fi
+
+if ! command -v xcrun >/dev/null 2>&1; then
+  echo "error: xcrun is not available. Install Xcode command line tools first." >&2
+  exit 1
+fi
+
+developer_dir="$(xcode-select -p 2>/dev/null || true)"
+if [[ -z "${developer_dir}" ]]; then
+  echo "error: no active Xcode developer directory is configured." >&2
+  echo "run: sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer" >&2
+  exit 1
+fi
+
+echo "Using Xcode developer directory:"
+echo "  ${developer_dir}"
+
+if command -v xcodebuild >/dev/null 2>&1; then
+  echo "Xcode version:"
+  xcodebuild -version | sed 's/^/  /'
+fi
+
+check_sdk_metal() {
+  local sdk="$1"
+  local tool
+  if ! tool="$(xcrun --sdk "${sdk}" --find metal 2>/dev/null)"; then
+    echo "Metal compiler is unavailable for ${sdk}."
+    return 1
+  fi
+
+  if xcrun --sdk "${sdk}" metal -v >/dev/null 2>&1; then
+    echo "Metal compiler available for ${sdk}:"
+    echo "  ${tool}"
+    return 0
+  fi
+
+  echo "Metal compiler is present but not executable for ${sdk}:"
+  echo "  ${tool}"
+  return 1
+}
+
+missing_metal=false
+check_sdk_metal iphonesimulator || missing_metal=true
+check_sdk_metal iphoneos || missing_metal=true
+
+if [[ "${missing_metal}" == true ]]; then
+  echo
+  echo "The iOS GPUI build needs Apple's Metal toolchain."
+  echo "Recommended fixes:"
+  echo "  sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer"
+  echo "  xcodebuild -downloadComponent MetalToolchain"
+  echo
+
+  if [[ "${install_metal_toolchain}" == true ]]; then
+    echo "Downloading Metal Toolchain..."
+    if ! output="$(xcodebuild -downloadComponent MetalToolchain 2>&1)"; then
+      printf '%s\n' "${output}"
+      echo
+      if grep -q "runFirstLaunch" <<<"${output}"; then
+        echo "Xcode still needs first-launch setup."
+        echo "Run:"
+        echo "  xcodebuild -runFirstLaunch"
+      fi
+      exit 1
+    fi
+    printf '%s\n' "${output}"
+    echo
+    check_sdk_metal iphonesimulator
+    check_sdk_metal iphoneos
+  else
+    echo "Re-run with --install-metal-toolchain to download it automatically."
+    exit 1
+  fi
+fi
+
+echo
+echo "Installed Rust Apple targets:"
+if command -v rustup >/dev/null 2>&1; then
+  rustup target list --installed | rg 'apple-(ios|darwin)' | sed 's/^/  /' || true
+else
+  echo "  rustup not found"
+fi
+
+echo
+echo "iOS toolchain setup looks ready."

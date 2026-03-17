@@ -2514,6 +2514,23 @@
   "context_servers": {},
   // Configures agent servers available in the agent panel.
   "agent_servers": {},
+  // Settings for mobile-first iPad surfaces.
+  "mobile": {
+    // Automatically reconnect to the most recent saved remote workspace on launch.
+    "restore_last_session": true,
+    // Use the shared remote workspace restore machinery on iPad.
+    "use_shared_remote_restore": true,
+    // Show AI entry points in the iPad workspace chrome.
+    "show_ai": true,
+    // Use the dedicated iPad-safe agent review flow when available.
+    "mobile_agent_review": true,
+    // Use denser panel controls better suited to iPad layouts.
+    "compact_panels": true,
+    // Prefer modal Git flows tuned for iPad layouts.
+    "mobile_git_modals": true,
+    // Preferred default height for the terminal dock on iPad, in pixels.
+    "terminal_default_height": 260.0
+  },
   "debugger": {
     "stepping_granularity": "line",
     "save_breakpoints": true,

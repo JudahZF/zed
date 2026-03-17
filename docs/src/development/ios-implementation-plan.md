@@ -1,4 +1,4 @@
-# Zed for iPadOS - Status and Remaining Plan
+# Zed Mobile (iPad-first) - Status and Remaining Plan
 
 > **Status:** Phases 1-3 are landed in the current tree; phase 4 is in progress; phase 5 is scaffolded
 > **Deployment target:** iOS 18.0 on iPad
@@ -10,6 +10,13 @@
 ## Overview
 
 This document tracks the current state of the iPad app work and the remaining plan to get it to a polished distributable build.
+
+Product naming currently follows this split:
+
+- Product and roadmap label: `Zed Mobile (iPad-first)`
+- Current implementation boundary: `crates/zed_ios`
+
+That split is intentional. The app is currently iPad-only in implementation, so the internal crate, static library, C entry point, logs, and persistence stay iOS-specific until there is real shared cross-mobile code.
 
 The app is intentionally remote-first. The iPad client connects to a machine running `zed-remote-server` over SSH, then boots the normal workspace stack against that remote project. Local file picking is intentionally unsupported today.
 
@@ -24,7 +31,7 @@ The app is intentionally remote-first. The iPad client connects to a machine run
 │  │  - Native Metal renderer                        │   │
 │  │  - CoreText text system                         │   │
 │  ├─────────────────────────────────────────────────┤   │
-│  │  zed_ios app crate                              │   │
+│  │  zed_ios app crate (internal)                   │   │
 │  │  - connect flow                                 │   │
 │  │  - tutorial flow                                │   │
 │  │  - remote workspace bootstrap                   │   │
@@ -87,6 +94,8 @@ The Xcode project already:
 - builds and links `libzed_ios.a`
 - links the required Apple frameworks for the current stack
 
+This is also the reason the internal target names remain `zed_ios` for now. `Zed Mobile` is the product direction; `zed_ios` is still the truthful implementation name.
+
 ### Phase 3: connection flow, tutorial, and workspace bootstrap
 
 The user-facing remote flow is largely implemented:
@@ -104,6 +113,8 @@ Persistence notes:
 - This is not the Keychain-based design originally sketched in the draft plan
 - Password prompting exists, but long-lived credential storage should still be treated as follow-up work unless explicitly finished and validated
 
+These filenames intentionally stay iOS-specific for now. They should not be renamed to `zed_mobile_*` until there is an actual shared mobile storage layer and an explicit migration plan.
+
 ## Current User Experience
 
 The current flow is:
@@ -114,7 +125,7 @@ The current flow is:
 4. Connect to a remote machine.
 5. Download or reuse the matching `zed-remote-server` binary as needed.
 6. Open the remote path as a project.
-7. Replace the root view with the full workspace UI and attach panels such as Project, Git, and Agents when available.
+7. Replace the root view with the shared workspace UI, keeping only a thin iOS status header with connection state and a Disconnect button while attaching panels such as Project, Git, and Agents when available.
 
 ## Remaining Work
 
@@ -138,12 +149,24 @@ The release path still needs dedicated work:
 - prepare App Store Connect and TestFlight distribution
 - write end-user and contributor documentation for building and testing the app
 
+## Build Prerequisites
+
+Before running `cargo check -p zed_ios --target aarch64-apple-ios-sim` or building the Xcode project:
+
+- make sure `xcode-select` points at a full Xcode installation
+- make sure the Apple Metal compiler is available to `xcrun`
+- use `script/setup-ios-toolchain` to validate the setup
+- if the Metal compiler is missing on macOS 26 / Xcode 26, run `script/setup-ios-toolchain --install-metal-toolchain`
+
+The current simulator/device build failure that mentions a missing Metal toolchain is an environment issue, not a signal that the in-tree iOS port should be replaced.
+
 ## Known Gaps and Risks
 
 - A full local `cargo check -p zed_ios` may still depend on Apple tooling being installed correctly, including the Metal toolchain.
 - The iOS renderer still contains at least one `unimplemented!()` fallback in `metal_atlas.rs`, so renderer edge cases need continued attention.
 - The app is intentionally remote-only today. Local workspace or document-picker support is out of scope for the current design.
 - The historical plan assumed several files and APIs that no longer match the implementation; this document supersedes that earlier draft.
+- Android is still a future platform from this repo's perspective. Do not rename internal iOS crates to `zed_mobile` until shared cross-mobile code actually exists.
 
 ## Key Files
 
