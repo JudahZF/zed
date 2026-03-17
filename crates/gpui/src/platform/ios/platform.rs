@@ -11,13 +11,22 @@ use crate::{
     PlatformTextSystem, PlatformWindow, Result, Subscription, Task, WindowAppearance,
     WindowParams,
 };
-use anyhow::anyhow;
+use anyhow::{Context as _, anyhow};
+use core_foundation::{
+    base::{CFType, CFTypeRef, TCFType},
+    boolean::CFBoolean,
+    data::CFData,
+    dictionary::{CFDictionary, CFMutableDictionary},
+    string::CFString,
+};
+use core_foundation_sys::{base::OSStatus, dictionary::CFDictionaryRef, string::CFStringRef};
 use futures::channel::oneshot;
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 use parking_lot::Mutex;
 use std::{
     ffi::c_void,
     path::{Path, PathBuf},
+    ptr,
     rc::Rc,
     sync::Arc,
 };
@@ -345,33 +354,113 @@ impl Platform for IosPlatform {
         }
     }
 
-    fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {
-        // TODO: Implement iOS Keychain support properly using the Security framework.
-        // The correct implementation requires:
-        // 1. Import Security framework CFString constants (kSecClass, kSecAttrService,
-        //    kSecAttrAccount, kSecValueData, etc.) rather than using string literals
-        //    like ns_string("kSecAttrService") which won't match the actual constants.
-        // 2. Use SecItemAdd for new entries and SecItemUpdate for existing ones.
-        // 3. Build a proper CFDictionary with the imported constant keys.
-        // 4. Handle the OSStatus return values from Security framework functions.
+    fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>> {
+        let url = url.to_string();
+        let username = username.to_string();
+        let password = password.to_vec();
+
         self.background_executor().spawn(async move {
-            Err(anyhow!("Keychain write_credentials not yet implemented for iOS"))
+            unsafe {
+                use security::*;
+
+                let url = CFString::from(url.as_str());
+                let username = CFString::from(username.as_str());
+                let password = CFData::from_buffer(&password);
+
+                let mut verb = "updating";
+                let mut query_attrs = CFMutableDictionary::with_capacity(2);
+                query_attrs.set(kSecClass as *const _, kSecClassInternetPassword as *const _);
+                query_attrs.set(kSecAttrServer as *const _, url.as_CFTypeRef());
+
+                let mut attrs = CFMutableDictionary::with_capacity(4);
+                attrs.set(kSecClass as *const _, kSecClassInternetPassword as *const _);
+                attrs.set(kSecAttrServer as *const _, url.as_CFTypeRef());
+                attrs.set(kSecAttrAccount as *const _, username.as_CFTypeRef());
+                attrs.set(kSecValueData as *const _, password.as_CFTypeRef());
+
+                let mut status = SecItemUpdate(
+                    query_attrs.as_concrete_TypeRef(),
+                    attrs.as_concrete_TypeRef(),
+                );
+
+                if status == errSecItemNotFound {
+                    verb = "creating";
+                    status = SecItemAdd(attrs.as_concrete_TypeRef(), ptr::null_mut());
+                }
+
+                anyhow::ensure!(status == errSecSuccess, "{verb} password failed: {status}");
+            }
+
+            Ok(())
         })
     }
 
-    fn read_credentials(&self, _url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
-        // TODO: Implement iOS Keychain support properly using the Security framework.
-        // See write_credentials for details on the correct implementation approach.
+    fn read_credentials(&self, url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
+        let url = url.to_string();
+
         self.background_executor().spawn(async move {
-            Err(anyhow!("Keychain read_credentials not yet implemented for iOS"))
+            let url = CFString::from(url.as_str());
+            let cf_true = CFBoolean::true_value().as_CFTypeRef();
+
+            unsafe {
+                use security::*;
+
+                let mut attrs = CFMutableDictionary::with_capacity(5);
+                attrs.set(kSecClass as *const _, kSecClassInternetPassword as *const _);
+                attrs.set(kSecAttrServer as *const _, url.as_CFTypeRef());
+                attrs.set(kSecReturnAttributes as *const _, cf_true);
+                attrs.set(kSecReturnData as *const _, cf_true);
+
+                let mut result = CFTypeRef::from(ptr::null());
+                let status = SecItemCopyMatching(attrs.as_concrete_TypeRef(), &mut result);
+                if status == errSecItemNotFound || status == errSecUserCanceled {
+                    return Ok(None);
+                }
+                if status != errSecSuccess {
+                    anyhow::bail!("reading password failed: {status}");
+                }
+
+                let result = CFType::wrap_under_create_rule(result)
+                    .downcast::<CFDictionary>()
+                    .context("keychain item was not a dictionary")?;
+                let username = result
+                    .find(kSecAttrAccount as *const _)
+                    .context("account was missing from keychain item")?;
+                let username = CFType::wrap_under_get_rule(*username)
+                    .downcast::<CFString>()
+                    .context("account was not a string")?;
+                let password = result
+                    .find(kSecValueData as *const _)
+                    .context("password was missing from keychain item")?;
+                let password = CFType::wrap_under_get_rule(*password)
+                    .downcast::<CFData>()
+                    .context("password was not data")?;
+
+                Ok(Some((username.to_string(), password.bytes().to_vec())))
+            }
         })
     }
 
-    fn delete_credentials(&self, _url: &str) -> Task<Result<()>> {
-        // TODO: Implement iOS Keychain support properly using the Security framework.
-        // See write_credentials for details on the correct implementation approach.
+    fn delete_credentials(&self, url: &str) -> Task<Result<()>> {
+        let url = url.to_string();
+
         self.background_executor().spawn(async move {
-            Err(anyhow!("Keychain delete_credentials not yet implemented for iOS"))
+            unsafe {
+                use security::*;
+
+                let url = CFString::from(url.as_str());
+                let mut query_attrs = CFMutableDictionary::with_capacity(2);
+                query_attrs.set(kSecClass as *const _, kSecClassInternetPassword as *const _);
+                query_attrs.set(kSecAttrServer as *const _, url.as_CFTypeRef());
+
+                let status = SecItemDelete(query_attrs.as_concrete_TypeRef());
+                anyhow::ensure!(
+                    status == errSecSuccess || status == errSecItemNotFound,
+                    "delete password failed: {status}"
+                );
+            }
+
+            Ok(())
         })
     }
 
@@ -436,4 +525,29 @@ impl PlatformKeyboardLayout for IosKeyboardLayout {
     fn name(&self) -> &str {
         &self.name
     }
+}
+
+mod security {
+    #![allow(non_upper_case_globals)]
+    use super::*;
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        pub static kSecClass: CFStringRef;
+        pub static kSecClassInternetPassword: CFStringRef;
+        pub static kSecAttrServer: CFStringRef;
+        pub static kSecAttrAccount: CFStringRef;
+        pub static kSecValueData: CFStringRef;
+        pub static kSecReturnAttributes: CFStringRef;
+        pub static kSecReturnData: CFStringRef;
+
+        pub fn SecItemAdd(attributes: CFDictionaryRef, result: *mut CFTypeRef) -> OSStatus;
+        pub fn SecItemUpdate(query: CFDictionaryRef, attributes: CFDictionaryRef) -> OSStatus;
+        pub fn SecItemDelete(query: CFDictionaryRef) -> OSStatus;
+        pub fn SecItemCopyMatching(query: CFDictionaryRef, result: *mut CFTypeRef) -> OSStatus;
+    }
+
+    pub const errSecSuccess: OSStatus = 0;
+    pub const errSecUserCanceled: OSStatus = -128;
+    pub const errSecItemNotFound: OSStatus = -25300;
 }

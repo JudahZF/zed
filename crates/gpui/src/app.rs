@@ -44,14 +44,14 @@ use crate::{
     Action, ActionBuildError, ActionRegistry, Any, AnyView, AnyWindowHandle, AppContext, Arena,
     ArenaBox, Asset, AssetSource, BackgroundExecutor, Bounds, ClipboardItem, CursorStyle,
     DispatchPhase, DisplayId, EventEmitter, FocusHandle, FocusMap, ForegroundExecutor, Global,
-    KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu,
-    PathPromptOptions, Pixels, Platform, PlatformDisplay, PlatformKeyboardLayout,
+    IosLifecycleEvent, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu, MenuItem,
+    OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay, PlatformKeyboardLayout,
     PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton, PromptHandle,
     PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation, ScreenCaptureSource,
     SharedString, SubscriberSet, Subscription, SvgRenderer, Task, TextRenderingMode, TextSystem,
     ThermalState, Window, WindowAppearance, WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
-    hash, init_app_menus,
+    current_platform, hash, init_app_menus, observe_ios_lifecycle,
 };
 
 mod async_context;
@@ -844,6 +844,19 @@ impl App {
         );
         activate();
         subscription
+    }
+
+    /// Invokes a handler when UIKit reports an iOS lifecycle transition.
+    pub fn on_ios_lifecycle<F>(&self, mut callback: F) -> Subscription
+    where
+        F: 'static + FnMut(IosLifecycleEvent, &mut App),
+    {
+        let app = self.this.clone();
+        observe_ios_lifecycle(move |event| {
+            if let Some(app) = app.upgrade() {
+                callback(event, &mut app.borrow_mut());
+            }
+        })
     }
 
     /// Gracefully quit the application via the platform's standard routine.

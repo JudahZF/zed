@@ -303,7 +303,6 @@ impl ZedIosApp {
             false,
             cx,
         );
-        agent_ui_v2::agents_panel::init(cx);
         command_palette::init(cx);
         editor::init(cx);
         diagnostics::init(cx);

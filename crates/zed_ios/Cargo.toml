@@ -17,7 +17,6 @@ workspace = true
 acp_thread.workspace = true
 acp_tools.workspace = true
 agent_ui.workspace = true
-agent_ui_v2.workspace = true
 anyhow.workspace = true
 askpass.workspace = true
 assets.workspace = true

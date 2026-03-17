@@ -9,6 +9,15 @@ mod ios;
 #[expect(missing_docs)]
 pub mod layer_shell;
 
+#[cfg(any(
+    all(
+        any(target_os = "linux", target_os = "freebsd"),
+        any(feature = "x11", feature = "wayland")
+    ),
+    all(target_os = "macos", feature = "macos-blade")
+))]
+mod blade;
+
 #[cfg(any(test, feature = "test-support"))]
 mod test;
 
@@ -100,6 +109,55 @@ pub fn observe_ios_lifecycle(callback: impl FnMut(IosLifecycleEvent) + 'static) 
 #[cfg(not(target_os = "ios"))]
 pub fn observe_ios_lifecycle(_callback: impl FnMut(IosLifecycleEvent) + 'static) -> Subscription {
     Subscription::new(|| {})
+}
+
+/// Returns a background executor for the current platform.
+pub fn background_executor() -> BackgroundExecutor {
+    current_platform(true).background_executor()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn current_platform(headless: bool) -> Rc<dyn Platform> {
+    Rc::new(MacPlatform::new(headless))
+}
+
+#[cfg(target_os = "ios")]
+pub(crate) fn current_platform(_headless: bool) -> Rc<dyn Platform> {
+    Rc::new(IosPlatform::new())
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub(crate) fn current_platform(headless: bool) -> Rc<dyn Platform> {
+    #[cfg(feature = "x11")]
+    use anyhow::Context as _;
+
+    if headless {
+        return Rc::new(HeadlessClient::new());
+    }
+
+    match guess_compositor() {
+        #[cfg(feature = "wayland")]
+        "Wayland" => Rc::new(WaylandClient::new()),
+
+        #[cfg(feature = "x11")]
+        "X11" => Rc::new(
+            X11Client::new()
+                .context("Failed to initialize X11 client.")
+                .unwrap(),
+        ),
+
+        "Headless" => Rc::new(HeadlessClient::new()),
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn current_platform(_headless: bool) -> Rc<dyn Platform> {
+    Rc::new(
+        WindowsPlatform::new()
+            .inspect_err(|err| show_error("Failed to launch", err.to_string()))
+            .unwrap(),
+    )
 }
 
 /// Return which compositor we're guessing we'll use.
