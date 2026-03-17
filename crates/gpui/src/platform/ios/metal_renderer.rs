@@ -76,9 +76,9 @@ pub unsafe fn new_renderer(
     _native_window: *mut c_void,
     _native_view: *mut c_void,
     _bounds: crate::Size<f32>,
-    _transparent: bool,
+    transparent: bool,
 ) -> Renderer {
-    MetalRenderer::new(context)
+    MetalRenderer::new(context, transparent)
 }
 
 pub(crate) struct InstanceBufferPool {
@@ -110,7 +110,7 @@ impl InstanceBufferPool {
         let buffer = self.buffers.pop().unwrap_or_else(|| {
             device.new_buffer(
                 self.buffer_size as u64,
-                MTLResourceOptions::StorageModeManaged,
+                MTLResourceOptions::StorageModeShared,
             )
         });
         InstanceBuffer {
@@ -147,7 +147,7 @@ pub(crate) struct MetalRenderer {
 }
 
 impl MetalRenderer {
-    pub fn new(instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>) -> Self {
+    pub fn new(instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>, transparent: bool) -> Self {
         // On iOS, there is only one GPU
         let Some(device) = metal::Device::system_default() else {
             log::error!("unable to access a compatible graphics device");
@@ -157,7 +157,7 @@ impl MetalRenderer {
         let layer = metal::MetalLayer::new();
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        layer.set_opaque(false);
+        layer.set_opaque(!transparent);
         layer.set_maximum_drawable_count(3);
         unsafe {
             let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: NO];
@@ -195,7 +195,7 @@ impl MetalRenderer {
         let unit_vertices = device.new_buffer_with_data(
             unit_vertices.as_ptr() as *const c_void,
             mem::size_of_val(&unit_vertices) as u64,
-            MTLResourceOptions::StorageModeManaged,
+            MTLResourceOptions::StorageModeShared,
         );
 
         let sample_count = [4, 2, 1]
@@ -324,8 +324,8 @@ impl MetalRenderer {
         self.msaa_texture = create_msaa_texture(&self.device, &self.layer, self.sample_count);
     }
 
-    pub fn update_transparency(&self, _transparent: bool) {
-        // todo(ios)?
+    pub fn update_transparency(&self, transparent: bool) {
+        self.layer.set_opaque(!transparent);
     }
 
     pub fn destroy(&self) {

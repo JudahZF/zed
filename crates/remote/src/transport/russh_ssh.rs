@@ -4,7 +4,7 @@
 //! like OpenSSH, which aren't available on iOS.
 
 use crate::{
-    RemoteArch, RemoteClientDelegate, RemoteOs, RemotePlatform,
+    HostKeyChallenge, HostKeyDecision, RemoteArch, RemoteClientDelegate, RemoteOs, RemotePlatform,
     remote_client::{CommandTemplate, RemoteConnection, RemoteConnectionOptions},
     transport::ssh::SshConnectionOptions,
     transport::{parse_platform, parse_shell},
@@ -23,9 +23,10 @@ use paths::remote_server_dir_relative;
 use prost::Message as ProstMessage;
 use release_channel::{AppVersion, ReleaseChannel};
 use rpc::proto::Envelope;
-use russh::keys::known_hosts::learn_known_hosts_path;
+use russh::keys::{PublicKeyBase64, known_hosts::learn_known_hosts_path};
 use russh::{ChannelMsg, client};
 use semver::Version;
+use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -66,11 +67,16 @@ struct RusshHandler {
     host: String,
     /// The port being connected to (used for known_hosts lookup)  
     port: u16,
+    delegate: Arc<dyn RemoteClientDelegate>,
 }
 
 impl RusshHandler {
-    fn new(host: String, port: u16) -> Self {
-        Self { host, port }
+    fn new(host: String, port: u16, delegate: Arc<dyn RemoteClientDelegate>) -> Self {
+        Self {
+            host,
+            port,
+            delegate,
+        }
     }
 
     /// Get the path to the known_hosts file.
@@ -87,6 +93,30 @@ impl RusshHandler {
             }
         }
         Ok(())
+    }
+
+    fn challenge_for_key(
+        host: &str,
+        port: u16,
+        public_key: &russh::keys::PublicKey,
+    ) -> HostKeyChallenge {
+        let fingerprint_sha256 = hex::encode(Sha256::digest(public_key.public_key_bytes()));
+        HostKeyChallenge {
+            host: host.to_string(),
+            port,
+            algorithm: public_key.algorithm().to_string(),
+            fingerprint_sha256,
+        }
+    }
+
+    async fn confirm_host_key(
+        delegate: &Arc<dyn RemoteClientDelegate>,
+        challenge: HostKeyChallenge,
+    ) -> Result<HostKeyDecision, russh::Error> {
+        delegate.confirm_host_key(challenge).await.map_err(|error| {
+            log::warn!("Host key confirmation failed: {error:#}");
+            russh::Error::Disconnect
+        })
     }
 }
 
@@ -110,6 +140,7 @@ impl client::Handler for RusshHandler {
         let host = self.host.clone();
         let port = self.port;
         let pubkey = server_public_key.clone();
+        let delegate = self.delegate.clone();
 
         async move {
             // Get the known_hosts file path
@@ -123,22 +154,24 @@ impl client::Handler for RusshHandler {
 
             // Check if the known_hosts file exists
             if !known_hosts_path.exists() {
-                // No known_hosts file yet - this is a first connection
-                // Learn the key for future connections (TOFU)
-                log::info!(
-                    "No known_hosts file found; learning host key for {}:{}",
-                    host,
-                    port
-                );
-                // Ensure the .ssh directory exists before writing
-                if let Err(e) = Self::ensure_ssh_dir_exists(&known_hosts_path) {
-                    log::warn!("Failed to create .ssh directory: {}", e);
+                let challenge = Self::challenge_for_key(&host, port, &pubkey);
+                match Self::confirm_host_key(&delegate, challenge).await? {
+                    HostKeyDecision::TrustAndSave => {
+                        log::info!("Trusting first-seen host key for {}:{}", host, port);
+                        if let Err(e) = Self::ensure_ssh_dir_exists(&known_hosts_path) {
+                            log::warn!("Failed to create .ssh directory: {}", e);
+                        }
+                        if let Err(e) =
+                            learn_known_hosts_path(&host, port, &pubkey, &known_hosts_path)
+                        {
+                            log::warn!("Failed to save host key to known_hosts: {}", e);
+                        }
+                        return Ok(true);
+                    }
+                    HostKeyDecision::Cancel => {
+                        return Ok(false);
+                    }
                 }
-                if let Err(e) = learn_known_hosts_path(&host, port, &pubkey, &known_hosts_path) {
-                    log::warn!("Failed to save host key to known_hosts: {}", e);
-                    // Still accept the connection even if we couldn't save
-                }
-                return Ok(true);
             }
 
             // Check the server key against known_hosts
@@ -153,18 +186,23 @@ impl client::Handler for RusshHandler {
                     Ok(true)
                 }
                 Ok(false) => {
-                    // Host not in known_hosts - learn the key (TOFU)
-                    log::info!(
-                        "Host {}:{} not in known_hosts; learning key (Trust On First Use)",
-                        host,
-                        port
-                    );
-                    if let Err(e) = learn_known_hosts_path(&host, port, &pubkey, &known_hosts_path)
-                    {
-                        log::warn!("Failed to save host key to known_hosts: {}", e);
-                        // Still accept the connection even if we couldn't save
+                    let challenge = Self::challenge_for_key(&host, port, &pubkey);
+                    match Self::confirm_host_key(&delegate, challenge).await? {
+                        HostKeyDecision::TrustAndSave => {
+                            log::info!(
+                                "Host {}:{} not in known_hosts; user approved trust",
+                                host,
+                                port
+                            );
+                            if let Err(e) =
+                                learn_known_hosts_path(&host, port, &pubkey, &known_hosts_path)
+                            {
+                                log::warn!("Failed to save host key to known_hosts: {}", e);
+                            }
+                            Ok(true)
+                        }
+                        HostKeyDecision::Cancel => Ok(false),
                     }
-                    Ok(true)
                 }
                 Err(russh::keys::Error::KeyChanged { line }) => {
                     // SECURITY: The host key has changed! This could indicate a MITM attack.
@@ -227,6 +265,7 @@ impl RusshRemoteConnection {
         let username_for_connect = username.clone();
         let host_for_handler = host.clone();
         let port_for_handler = port;
+        let delegate_for_connect = delegate.clone();
 
         let (mut session, mut authenticated) = Tokio::spawn_result(cx, async move {
             let config = client::Config {
@@ -234,7 +273,8 @@ impl RusshRemoteConnection {
                 ..Default::default()
             };
             let config = Arc::new(config);
-            let handler = RusshHandler::new(host_for_handler, port_for_handler);
+            let handler =
+                RusshHandler::new(host_for_handler, port_for_handler, delegate_for_connect);
 
             let mut session = client::connect(config, &addr_for_connect, handler)
                 .await
@@ -565,6 +605,26 @@ impl RusshRemoteConnection {
         let dst_path =
             paths::remote_server_dir_relative().join(RelPath::unix(&binary_name).unwrap());
 
+        #[cfg(debug_assertions)]
+        if let Some(remote_server_path) =
+            super::build_remote_server_from_source(&self.ssh_platform, delegate.as_ref(), cx)
+                .await?
+        {
+            let tmp_path = paths::remote_server_dir_relative().join(
+                RelPath::unix(&format!(
+                    "download-{}-{}",
+                    std::process::id(),
+                    remote_server_path.file_name().unwrap().to_string_lossy()
+                ))
+                .unwrap(),
+            );
+            self.upload_local_server_binary(&remote_server_path, &tmp_path, delegate, cx)
+                .await?;
+            self.extract_server_binary(&dst_path, &tmp_path, delegate, cx)
+                .await?;
+            return Ok(dst_path);
+        }
+
         log::debug!(
             "Checking for existing binary at: {}",
             dst_path.display(self.path_style())
@@ -593,12 +653,8 @@ impl RusshRemoteConnection {
         }
 
         let wanted_version = cx.update(|cx| match release_channel {
-            ReleaseChannel::Nightly => Ok(None),
-            ReleaseChannel::Dev => {
-                anyhow::bail!(
-                    "ZED_BUILD_REMOTE_SERVER is not set and no remote server exists at ({:?})",
-                    dst_path
-                )
+            ReleaseChannel::Nightly | ReleaseChannel::Dev => {
+                Ok::<Option<Version>, anyhow::Error>(None)
             }
             _ => Ok(Some(AppVersion::global(cx))),
         })??;

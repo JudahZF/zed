@@ -8,8 +8,9 @@ mod transport;
 pub use remote_client::OpenWslPath;
 pub use remote_client::{
     CommandTemplate, ConnectionIdentifier, ConnectionState, HostKeyChallenge, HostKeyDecision,
-    Interactive, RemoteArch, RemoteClient, RemoteClientDelegate, RemoteClientEvent,
-    RemoteConnection, RemoteConnectionOptions, RemoteOs, RemotePlatform, connect,
+    Interactive, RecoveryState, RemoteArch, RemoteClient, RemoteClientDelegate,
+    RemoteClientEvent, RemoteConnection, RemoteConnectionOptions, RemoteOs, RemotePlatform,
+    connect,
 };
 pub use transport::docker::DockerConnectionOptions;
 pub use transport::ssh::{SshConnectionOptions, SshPortForwardOption};

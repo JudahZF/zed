@@ -137,7 +137,6 @@ pub enum Interactive {
     /// Do not allocate a TTY - for commands that communicate via piped stdio.
     No,
 }
-
 pub trait RemoteClientDelegate: Send + Sync {
     fn ask_password(
         &self,
@@ -333,6 +332,33 @@ impl From<&State> for ConnectionState {
             State::HeartbeatMissed { .. } => Self::HeartbeatMissed,
             State::ReconnectExhausted => Self::Disconnected,
             State::ServerNotRunning => Self::Disconnected,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryState {
+    Connecting,
+    Connected,
+    HeartbeatMissed,
+    Reconnecting,
+    ReconnectFailed,
+    ReconnectExhausted,
+    ServerNotRunning,
+    Disconnected,
+}
+
+impl From<Option<&State>> for RecoveryState {
+    fn from(value: Option<&State>) -> Self {
+        match value {
+            Some(State::Connecting) => Self::Connecting,
+            Some(State::Connected { .. }) => Self::Connected,
+            Some(State::HeartbeatMissed { .. }) => Self::HeartbeatMissed,
+            Some(State::Reconnecting) => Self::Reconnecting,
+            Some(State::ReconnectFailed { .. }) => Self::ReconnectFailed,
+            Some(State::ReconnectExhausted) => Self::ReconnectExhausted,
+            Some(State::ServerNotRunning) => Self::ServerNotRunning,
+            None => Self::Disconnected,
         }
     }
 }
@@ -865,7 +891,9 @@ impl RemoteClient {
                             }
                         }
                     } else {
-                        log::error!("proxy process terminated unexpectedly: {exit_code}");
+                        log::warn!(
+                            "proxy process terminated unexpectedly with exit code {exit_code}; reconnecting"
+                        );
                         this.update(cx, |this, cx| {
                             this.reconnect(cx).ok();
                         })?;
@@ -1012,8 +1040,16 @@ impl RemoteClient {
             .unwrap_or(ConnectionState::Disconnected)
     }
 
+    pub fn recovery_state(&self) -> RecoveryState {
+        RecoveryState::from(self.state.as_ref())
+    }
+
     pub fn is_disconnected(&self) -> bool {
         self.connection_state() == ConnectionState::Disconnected
+    }
+
+    pub fn retry_reconnect(&mut self, cx: &mut Context<Self>) -> Result<()> {
+        self.reconnect(cx)
     }
 
     pub fn path_style(&self) -> PathStyle {

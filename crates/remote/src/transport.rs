@@ -191,6 +191,13 @@ async fn build_remote_server_from_source(
     binary_exists_on_server: bool,
     cx: &mut AsyncApp,
 ) -> Result<Option<std::path::PathBuf>> {
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (platform, delegate, cx);
+        // iOS clients should use the existing remote binary/download flow rather than
+        // attempting a local source build, which would require unsupported cross-compilation.
+        return Ok(None);
+    }
     use std::env::VarError;
     use std::path::Path;
     use util::command::{Command, Stdio, new_command};
