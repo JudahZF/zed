@@ -5,14 +5,14 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable, IntoElement,
-    Render, Window,
+    AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Window,
+    div, prelude::*,
 };
-use project_panel::ProjectPanel;
 use remote::RemoteClient;
-use workspace::{self, AppState};
+use workspace::AppState;
 
 use crate::connect_view::{ConnectView, ConnectionSucceeded, ShowTutorialRequested};
+use crate::mobile_workspace_chrome::MobileWorkspaceChrome;
 use crate::tutorial_view::{TutorialDismissed, TutorialView};
 use crate::workspace_view::{DisconnectRequested, WorkspaceReady, WorkspaceView};
 
@@ -37,10 +37,28 @@ pub struct RootView {
     /// This is stored here because AppState::set_global only keeps a weak reference.
     #[allow(dead_code)]
     app_state: Arc<AppState>,
+    auto_restore_on_activation: bool,
 }
 
 impl RootView {
     pub fn new(app_state: Arc<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_auto_restore(app_state, true, window, cx)
+    }
+
+    pub fn new_without_auto_restore(
+        app_state: Arc<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_auto_restore(app_state, false, window, cx)
+    }
+
+    fn new_with_auto_restore(
+        app_state: Arc<AppState>,
+        auto_restore_on_activation: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let connect_view = cx.new(|cx| ConnectView::new(window, cx));
         let window_handle = window.window_handle();
 
@@ -60,10 +78,16 @@ impl RootView {
                 this.on_connection_succeeded(
                     event.client.clone(),
                     event.remote_path.clone(),
+                    event.connection_profile_id,
                     cx,
                 );
             },
         )
+        .detach();
+
+        cx.observe_window_activation(window, |this, window, cx| {
+            this.on_window_activation_changed(window, cx);
+        })
         .detach();
 
         Self {
@@ -75,6 +99,27 @@ impl RootView {
             window_handle,
             focus_handle: cx.focus_handle(),
             app_state,
+            auto_restore_on_activation,
+        }
+    }
+
+    fn on_window_activation_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.auto_restore_on_activation {
+            return;
+        }
+
+        if window.is_window_active() {
+            if self.current_screen != Screen::Connect || self.remote_client.is_some() {
+                return;
+            }
+
+            let _ = self.connect_view.update(cx, |connect_view, cx| {
+                connect_view.maybe_resume_last_session_automatically(window, cx);
+            });
+        } else {
+            let _ = self.connect_view.update(cx, |connect_view, _cx| {
+                connect_view.reset_auto_restore_attempt();
+            });
         }
     }
 
@@ -82,6 +127,7 @@ impl RootView {
         &mut self,
         client: Entity<RemoteClient>,
         remote_path: Option<String>,
+        connection_profile_id: Option<i64>,
         cx: &mut Context<Self>,
     ) {
         log::info!("[Zed iOS] Connection succeeded, switching to workspace view");
@@ -92,7 +138,15 @@ impl RootView {
         // Create the workspace view using window handle
         let window_handle = self.window_handle;
         let workspace = window_handle.update(cx, |_, window, cx| {
-            cx.new(|cx| WorkspaceView::new(client, remote_path.clone(), window, cx))
+            cx.new(|cx| {
+                WorkspaceView::new(
+                    client,
+                    remote_path.clone(),
+                    connection_profile_id,
+                    window,
+                    cx,
+                )
+            })
         });
 
         if let Ok(workspace) = workspace {
@@ -109,7 +163,7 @@ impl RootView {
             cx.subscribe(
                 &workspace,
                 |this, _workspace_view, event: &WorkspaceReady, cx| {
-                    this.on_workspace_ready(event.project.clone(), event.app_state.clone(), cx);
+                    this.on_workspace_ready(event, cx);
                 },
             )
             .detach();
@@ -123,52 +177,32 @@ impl RootView {
         cx.notify();
     }
 
-    fn on_workspace_ready(
-        &mut self,
-        project: Entity<project::Project>,
-        app_state: Arc<AppState>,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_workspace_ready(&mut self, event: &WorkspaceReady, cx: &mut Context<Self>) {
         log::info!("[Zed iOS] Workspace ready, replacing window root");
 
         let window_handle = self.window_handle;
+        let app_state = self.app_state.clone();
+        let workspace = event.workspace.clone();
+        let remote_client = event.client.clone();
+        let connection_profile_id = event.connection_profile_id;
+        let remote_path = event.remote_path.clone();
 
         cx.spawn(async move |_this, cx| {
-            log::info!("[Zed iOS] Spawned task: replacing root with Workspace");
+            log::info!("[Zed iOS] Spawned task: replacing root with MobileWorkspaceChrome");
 
             let replace_result = window_handle.update(cx, move |_, window, cx| {
-                let project = project.clone();
-                let app_state = app_state.clone();
-                let workspace = window.replace_root(cx, move |window, cx| {
-                    workspace::Workspace::new(None, project, app_state, window, cx)
+                window.replace_root(cx, move |window, cx| {
+                    MobileWorkspaceChrome::new(
+                        workspace.clone(),
+                        remote_client.clone(),
+                        connection_profile_id,
+                        remote_path.clone(),
+                        app_state.clone(),
+                        window,
+                        cx,
+                    )
                 });
-                let workspace_handle = workspace.downgrade();
-                window
-                    .spawn(cx, async move |cx| {
-                        match ProjectPanel::load(workspace_handle.clone(), cx.clone()).await {
-                            Ok(panel) => {
-                                if let Err(err) = workspace_handle.update_in(
-                                    cx,
-                                    |workspace, window, cx| {
-                                        workspace.add_panel(panel, window, cx);
-                                        workspace.open_panel::<ProjectPanel>(window, cx);
-                                    },
-                                ) {
-                                    log::error!(
-                                        "[Zed iOS] Failed to attach project panel: {err}"
-                                    );
-                                }
-                            }
-                            Err(err) => {
-                                log::error!(
-                                    "[Zed iOS] Failed to load project panel: {err:#}"
-                                );
-                            }
-                        }
-                    })
-                    .detach();
                 window.activate_window();
-                workspace
             });
 
             match replace_result {

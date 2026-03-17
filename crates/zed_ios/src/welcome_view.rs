@@ -4,7 +4,9 @@
 
 #![allow(dead_code)]
 
-use gpui::{Context, IntoElement, Render, SharedString, Window, div, prelude::*, px, rgb, rgba};
+use gpui::{
+    Context, IntoElement, Render, SharedString, Window, div, img, prelude::*, px, rgb, rgba,
+};
 
 pub struct WelcomeView {
     title: SharedString,
@@ -57,23 +59,11 @@ impl Render for WelcomeView {
             .justify_center()
             .items_center()
             .bg(bg_color)
-            // Logo area - a simple colored rectangle as placeholder
             .child(
-                div()
+                img("images/zed_app_icon.png")
                     .w(px(120.0))
                     .h(px(120.0))
                     .rounded(px(24.0))
-                    .bg(accent_color)
-                    .flex()
-                    .justify_center()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(48.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(bg_color)
-                            .child("Z")
-                    )
             )
             // Title
             .child(

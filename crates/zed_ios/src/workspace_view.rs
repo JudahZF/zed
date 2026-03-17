@@ -1,26 +1,30 @@
 //! Workspace view shown after successful SSH connection.
 //!
 //! This view shows loading/error states while setting up the remote workspace.
-//! Once ready, it triggers a window root replacement to install the full
-//! workspace::Workspace as the window root (required by Workspace's architecture).
+//! Once ready, it hands the restored shared workspace entity to the mobile
+//! chrome so iPad can wrap the normal workspace stack instead of recreating it.
 
 use gpui::{
-    div, prelude::*, px, rgb, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, Render, Window,
+    AnyWindowHandle, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    Render, Window, div, prelude::*, px, rgb,
 };
 use project::Project;
 use remote::{RemoteClient, RemoteConnectionOptions, SshConnectionOptions};
 use std::path::PathBuf;
-use std::sync::Arc;
-use workspace::AppState;
+use workspace::{AppState, Workspace};
+
+use crate::mobile_feature_policy::MobileFeaturePolicy;
+use crate::persistence::{ConnectionDb, SessionRestoreState, current_timestamp};
 
 /// Event emitted when user wants to disconnect
 pub struct DisconnectRequested;
 
 /// Event emitted when workspace is ready and should replace the window root
 pub struct WorkspaceReady {
-    pub project: Entity<Project>,
-    pub app_state: Arc<AppState>,
+    pub workspace: Entity<Workspace>,
+    pub client: Entity<RemoteClient>,
+    pub connection_profile_id: Option<i64>,
+    pub remote_path: Option<String>,
 }
 
 /// Current state of the workspace loading process
@@ -43,15 +47,16 @@ pub struct WorkspaceView {
     focus_handle: FocusHandle,
     connection_details: ConnectionDetails,
     load_state: WorkspaceLoadState,
-    /// The project entity for the remote connection
-    project: Option<Entity<Project>>,
+    workspace: Option<Entity<Workspace>>,
     initial_path: Option<String>,
+    connection_profile_id: Option<i64>,
 }
 
 impl WorkspaceView {
     pub fn new(
         client: Entity<RemoteClient>,
         initial_path: Option<String>,
+        connection_profile_id: Option<i64>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -63,8 +68,9 @@ impl WorkspaceView {
             focus_handle: cx.focus_handle(),
             connection_details,
             load_state: WorkspaceLoadState::Loading("Initializing...".to_string()),
-            project: None,
+            workspace: None,
             initial_path,
+            connection_profile_id,
         };
 
         this.start_workspace_load(window, cx);
@@ -73,20 +79,20 @@ impl WorkspaceView {
 
     fn disconnect(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         log::info!("[Zed iOS] Disconnect requested");
-        self.project = None;
+        self.workspace = None;
         cx.emit(DisconnectRequested);
     }
 
     fn retry_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("[Zed iOS] Retrying connection...");
         self.load_state = WorkspaceLoadState::Reconnecting("Reconnecting...".to_string());
-        self.project = None;
+        self.workspace = None;
         cx.notify();
 
         self.start_workspace_load(window, cx);
     }
 
-    fn start_workspace_load(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn start_workspace_load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let app_state = match AppState::try_global(cx).and_then(|state| state.upgrade()) {
             Some(state) => state,
             None => {
@@ -98,6 +104,8 @@ impl WorkspaceView {
         };
 
         let client = self.client.clone();
+        let connection_options = client.read(cx).connection_options();
+        let use_shared_remote_restore = MobileFeaturePolicy::from_app(cx).use_shared_remote_restore;
         self.load_state = WorkspaceLoadState::Loading("Creating remote project...".to_string());
         cx.notify();
 
@@ -112,9 +120,12 @@ impl WorkspaceView {
             true,
             cx,
         );
-        self.project = Some(project.clone());
+        let workspace =
+            cx.new(|cx| Workspace::new(None, project.clone(), app_state.clone(), window, cx));
+        let window_handle: AnyWindowHandle = window.window_handle();
+        self.workspace = Some(workspace.clone());
 
-        self.load_state = WorkspaceLoadState::Loading("Opening remote folder...".to_string());
+        self.load_state = WorkspaceLoadState::Loading("Restoring remote workspace...".to_string());
         cx.notify();
 
         // Open the home directory on the remote
@@ -127,36 +138,149 @@ impl WorkspaceView {
         let paths = [PathBuf::from(path)];
 
         cx.spawn(async move |this, cx| {
-            // Add worktrees to the project
-            let add_result = cx.update(|cx| {
+            // Ensure the requested worktrees exist before asking the shared workspace
+            // layer to restore its serialized state for these remote roots.
+            let add_tasks = match cx.update(|cx| {
                 project.update(cx, |project, cx| {
-                    let tasks: Vec<_> = paths
+                    paths
                         .iter()
                         .map(|path| project.find_or_create_worktree(path, true, cx))
-                        .collect();
-                    cx.background_executor().spawn(async move {
-                        for task in tasks {
-                            task.await?;
-                        }
-                        Ok::<_, anyhow::Error>(())
-                    })
+                        .collect::<Vec<_>>()
                 })
-            });
+            }) {
+                Ok(tasks) => tasks,
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        log::error!("[Zed iOS] Failed to queue remote worktree creation: {err:#}");
+                        this.load_state =
+                            WorkspaceLoadState::Error(format!("Failed to open project: {err:#}"));
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
 
-            let result = match add_result {
-                Ok(task) => task.await,
-                Err(err) => Err(err),
+            let mut canonical_paths = Vec::with_capacity(add_tasks.len());
+            for task in add_tasks {
+                let (worktree, relative_path) = match task.await {
+                    Ok(result) => result,
+                    Err(err) => {
+                        this.update(cx, |this, cx| {
+                            log::error!("[Zed iOS] Failed to create remote worktree: {err:#}");
+                            this.load_state =
+                                WorkspaceLoadState::Error(format!("Failed to open project: {err:#}"));
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+
+                let canonical_path = match worktree.read_with(cx, |worktree, _| {
+                    if relative_path.is_empty() {
+                        worktree.abs_path().as_ref().to_path_buf()
+                    } else {
+                        worktree.absolutize(&relative_path)
+                    }
+                }) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        this.update(cx, |this, cx| {
+                            log::error!(
+                                "[Zed iOS] Failed to resolve canonical remote path: {err:#}"
+                            );
+                            this.load_state =
+                                WorkspaceLoadState::Error(format!("Failed to open project: {err:#}"));
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+
+                canonical_paths.push(canonical_path);
+            }
+
+            let opened_remote_path = canonical_paths
+                .first()
+                .map(|path| path.to_string_lossy().into_owned());
+
+            let restore_result = {
+                let paths = canonical_paths;
+                if use_shared_remote_restore {
+                    match window_handle.update(cx, move |_, window, cx| {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.restore_remote_project(
+                                connection_options.clone(),
+                                paths,
+                                window,
+                                cx,
+                            )
+                        })
+                    }) {
+                        Ok(task) => task.await.map(|_| ()),
+                        Err(err) => Err(err),
+                    }
+                } else {
+                    match window_handle.update(cx, move |_, window, cx| {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.open_paths(
+                                paths,
+                                workspace::OpenOptions::default(),
+                                None,
+                                window,
+                                cx,
+                            )
+                        })
+                    }) {
+                        Ok(task) => {
+                            let _ = task.await;
+                            Ok(())
+                        }
+                        Err(err) => Err(err),
+                    }
+                }
             };
 
             this.update(cx, |this, cx| {
-                match result {
+                match restore_result {
                     Ok(_) => {
                         log::info!("[Zed iOS] Remote project opened successfully");
+                        let remote_path = opened_remote_path.clone().or_else(|| {
+                            this.initial_path
+                                .clone()
+                                .filter(|path| !path.trim().is_empty())
+                        });
+
+                        if let Some(connection_profile_id) = this.connection_profile_id {
+                            if let Some(remote_path) = remote_path.clone() {
+                                if let Err(err) = ConnectionDb::open().and_then(|db| {
+                                    db.save_session_restore_state(&SessionRestoreState {
+                                        connection_profile_id,
+                                        remote_path: Some(remote_path.clone()),
+                                        last_opened_worktree: Some(remote_path),
+                                        workspace_state_json: None,
+                                        updated_at: current_timestamp(),
+                                    })
+                                }) {
+                                    log::warn!(
+                                        "[Zed iOS] Failed to save session restore state after workspace open: {err}"
+                                    );
+                                }
+                            }
+
+                        }
                         this.load_state = WorkspaceLoadState::Ready;
 
                         // Emit event to trigger workspace installation
-                        if let Some(project) = this.project.clone() {
-                            cx.emit(WorkspaceReady { project, app_state });
+                        if let Some(workspace) = this.workspace.clone() {
+                            cx.emit(WorkspaceReady {
+                                workspace,
+                                client: this.client.clone(),
+                                connection_profile_id: this.connection_profile_id,
+                                remote_path,
+                            });
                         }
                     }
                     Err(err) => {

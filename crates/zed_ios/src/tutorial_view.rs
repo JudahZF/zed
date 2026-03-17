@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use gpui::{
-    div, prelude::*, px, rgb, App, Context, FocusHandle, Focusable, IntoElement, Render, Window,
+    App, Context, FocusHandle, Focusable, IntoElement, Render, Window, div, prelude::*, px, rgb,
 };
 
 /// The tutorial steps
@@ -25,6 +25,18 @@ const TUTORIAL_STEPS: &[TutorialStep] = &[
     TutorialStep {
         title: "Connect",
         content: include_str!("tutorial/04_connect.md"),
+    },
+    TutorialStep {
+        title: "Authentication",
+        content: include_str!("tutorial/05_authentication.md"),
+    },
+    TutorialStep {
+        title: "Keyboard",
+        content: include_str!("tutorial/06_keyboard.md"),
+    },
+    TutorialStep {
+        title: "Limits",
+        content: include_str!("tutorial/07_limits.md"),
     },
 ];
 

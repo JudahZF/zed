@@ -6,11 +6,11 @@
 use std::ops::Range;
 
 use gpui::{
-    div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
-    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, GlobalElementId, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    PaintQuad, Pixels, Point, Render, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
-    Window,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, PaintQuad, Pixels, Point, Render, ShapedLine,
+    SharedString, Style, TextRun, UTF16Selection, Window, div, fill, point, prelude::*, px,
+    relative, size,
 };
 use theme::ActiveTheme;
 use unicode_segmentation::UnicodeSegmentation;
@@ -383,6 +383,7 @@ impl EntityInputHandler for TextInput {
             .and_then(|range_utf16| {
                 self.content_range_for_display_utf16_range(range_utf16, &display_text)
             })
+            .or_else(|| self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
         self.content = self.content[0..range.start].to_string()
@@ -409,6 +410,7 @@ impl EntityInputHandler for TextInput {
             .and_then(|range_utf16| {
                 self.content_range_for_display_utf16_range(range_utf16, &display_text)
             })
+            .or_else(|| self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
 
         self.content = self.content[0..range.start].to_string()
@@ -427,7 +429,11 @@ impl EntityInputHandler for TextInput {
                 new_end..new_end
             });
 
-        self.marked_range = Some(range.start..range.start + new_text.len());
+        if new_text.is_empty() {
+            self.marked_range = None;
+        } else {
+            self.marked_range = Some(range.start..range.start + new_text.len());
+        }
         self.selected_range = new_selected;
         self.selection_reversed = false;
         cx.notify();

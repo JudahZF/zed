@@ -40,6 +40,8 @@ targets:
         PRODUCT_NAME: Zed
         INFOPLIST_FILE: Zed/Info.plist
         CODE_SIGN_ENTITLEMENTS: Zed/Entitlements.plist
+        CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]: NO
+        CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "2"
         SUPPORTS_MACCATALYST: NO
