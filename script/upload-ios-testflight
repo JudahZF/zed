@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: script/upload-ios-testflight [options]
+
+Export a signed iOS archive and upload the resulting .ipa to TestFlight.
+
+Options:
+  --archive-path <path>         Override the .xcarchive input path.
+  --export-path <path>          Override the export output directory.
+  --api-key <id>                App Store Connect API key identifier.
+  --api-issuer <id>             App Store Connect API issuer identifier.
+  --team-id <id>                Override the export team identifier.
+  --signing-style <style>       Export signing style. Default: automatic.
+  --internal-only               Mark the build as internal-TestFlight-only.
+  --skip-export                 Upload an existing .ipa from the export path.
+  --skip-upload                 Export the .ipa without uploading it.
+  --show-progress               Show altool progress output.
+  -h, --help                    Show this help.
+
+Environment fallbacks:
+  APP_STORE_CONNECT_API_KEY_ID
+  APP_STORE_CONNECT_API_ISSUER_ID
+  IOS_DEVELOPMENT_TEAM
+EOF
+}
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+archive_path="${repo_root}/target/ios/Zed.xcarchive"
+export_path="${repo_root}/target/ios/testflight"
+api_key="${APP_STORE_CONNECT_API_KEY_ID:-}"
+api_issuer="${APP_STORE_CONNECT_API_ISSUER_ID:-}"
+team_id="${IOS_DEVELOPMENT_TEAM:-}"
+signing_style="automatic"
+internal_only=false
+skip_export=false
+skip_upload=false
+show_progress=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --archive-path)
+      archive_path="$2"
+      shift 2
+      ;;
+    --export-path)
+      export_path="$2"
+      shift 2
+      ;;
+    --api-key)
+      api_key="$2"
+      shift 2
+      ;;
+    --api-issuer)
+      api_issuer="$2"
+      shift 2
+      ;;
+    --team-id)
+      team_id="$2"
+      shift 2
+      ;;
+    --signing-style)
+      signing_style="$2"
+      shift 2
+      ;;
+    --internal-only)
+      internal_only=true
+      shift
+      ;;
+    --skip-export)
+      skip_export=true
+      shift
+      ;;
+    --skip-upload)
+      skip_upload=true
+      shift
+      ;;
+    --show-progress)
+      show_progress=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option '$1'" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "${signing_style}" != "automatic" && "${signing_style}" != "manual" ]]; then
+  echo "error: --signing-style must be 'automatic' or 'manual'" >&2
+  exit 1
+fi
+
+if [[ "${skip_export}" == false && ! -d "${archive_path}" ]]; then
+  echo "error: archive not found at ${archive_path}" >&2
+  echo "Run 'script/build-ios-app archive' first." >&2
+  exit 1
+fi
+
+mkdir -p "${export_path}"
+
+export_options_plist="$(mktemp "${TMPDIR:-/tmp}/zed-ios-export-options.XXXXXX.plist")"
+cleanup() {
+  rm -f "${export_options_plist}"
+}
+trap cleanup EXIT
+
+cat >"${export_options_plist}" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>destination</key>
+  <string>export</string>
+  <key>generateAppStoreInformation</key>
+  <true/>
+  <key>manageAppVersionAndBuildNumber</key>
+  <true/>
+  <key>method</key>
+  <string>app-store-connect</string>
+  <key>signingStyle</key>
+  <string>${signing_style}</string>
+  <key>stripSwiftSymbols</key>
+  <true/>
+  <key>testFlightInternalTestingOnly</key>
+  <$( [[ "${internal_only}" == true ]] && echo "true" || echo "false" )/>
+  <key>uploadSymbols</key>
+  <true/>
+EOF
+
+if [[ -n "${team_id}" ]]; then
+  cat >>"${export_options_plist}" <<EOF
+  <key>teamID</key>
+  <string>${team_id}</string>
+EOF
+fi
+
+cat >>"${export_options_plist}" <<'EOF'
+</dict>
+</plist>
+EOF
+
+if [[ "${skip_export}" == false ]]; then
+  xcodebuild \
+    -exportArchive \
+    -archivePath "${archive_path}" \
+    -exportPath "${export_path}" \
+    -exportOptionsPlist "${export_options_plist}"
+fi
+
+ipa_path="$(find "${export_path}" -maxdepth 1 -name '*.ipa' -print | head -n 1)"
+if [[ -z "${ipa_path}" ]]; then
+  echo "error: no .ipa found in ${export_path}" >&2
+  exit 1
+fi
+
+echo "Exported ipa:"
+echo "  ${ipa_path}"
+
+if [[ "${skip_upload}" == true ]]; then
+  exit 0
+fi
+
+if [[ -z "${api_key}" || -z "${api_issuer}" ]]; then
+  echo "error: App Store Connect API credentials are required for upload" >&2
+  echo "Provide --api-key and --api-issuer, or set APP_STORE_CONNECT_API_KEY_ID and APP_STORE_CONNECT_API_ISSUER_ID." >&2
+  exit 1
+fi
+
+altool_args=(
+  --upload-package "${ipa_path}"
+  --api-key "${api_key}"
+  --api-issuer "${api_issuer}"
+  --wait
+)
+
+if [[ "${show_progress}" == true ]]; then
+  altool_args+=(--show-progress)
+fi
+
+xcrun altool "${altool_args[@]}"

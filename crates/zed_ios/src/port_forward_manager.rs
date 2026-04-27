@@ -2,7 +2,6 @@ use anyhow::{Context as _, Result, anyhow};
 use gpui::{Context, Entity};
 use remote::{RemoteClient, SshPortForwardOption};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
-use util::command::{Child, new_command};
 
 use crate::persistence::ConnectionDb;
 
@@ -25,7 +24,6 @@ pub struct PortForwardManager {
     connection_profile_id: Option<i64>,
     desired_forwards: Vec<SshPortForwardOption>,
     status_by_forward: Vec<PortForwardStatus>,
-    active_child: Option<Child>,
     suspended: bool,
     last_error: Option<String>,
 }
@@ -50,7 +48,6 @@ impl PortForwardManager {
             connection_profile_id,
             desired_forwards,
             status_by_forward,
-            active_child: None,
             suspended: false,
             last_error: None,
         }
@@ -62,7 +59,7 @@ impl PortForwardManager {
         }
         self.suspended = suspended;
         if suspended {
-            self.stop_active_child();
+            self.stop_active_forwards(cx);
             self.status_by_forward = self
                 .desired_forwards
                 .iter()
@@ -84,8 +81,23 @@ impl PortForwardManager {
         self.apply_forwards(desired, cx);
     }
 
+    pub fn has_forwards(&self) -> bool {
+        !self.desired_forwards.is_empty()
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.suspended
+    }
+
+    pub fn statuses(&self) -> &[PortForwardStatus] {
+        &self.status_by_forward
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
     pub fn apply_forwards(&mut self, desired: Vec<SshPortForwardOption>, cx: &mut Context<Self>) {
-        let previous_desired = self.desired_forwards.clone();
         self.desired_forwards = desired.clone();
         self.last_error = None;
         self.status_by_forward = desired
@@ -97,11 +109,11 @@ impl PortForwardManager {
                 message: Some("Applying...".to_string()),
             })
             .collect();
-        self.stop_active_child();
         let remote_client = self.remote_client.clone();
         let connection_profile_id = self.connection_profile_id;
 
         if self.suspended || desired.is_empty() {
+            self.stop_active_forwards(cx);
             self.status_by_forward = desired
                 .iter()
                 .cloned()
@@ -120,33 +132,37 @@ impl PortForwardManager {
         }
 
         cx.spawn(async move |this, cx| {
-            let apply_result = validate_forwards(&desired).and_then(|validated| {
-                let tuples = validated
-                    .iter()
-                    .map(|forward| {
-                        (
-                            forward.local_port,
-                            forward
-                                .remote_host
-                                .clone()
-                                .unwrap_or_else(|| "localhost".to_string()),
-                            forward.remote_port,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let command = remote_client
-                    .read_with(cx, |client, _| client.build_forward_ports_command(tuples))?;
-                let child = new_command(command.program)
-                    .args(command.args)
-                    .envs(command.env)
-                    .spawn()
-                    .context("spawning forwarded-port process")?;
-                Ok::<_, anyhow::Error>(child)
-            });
+            let apply_result = match validate_forwards(&desired) {
+                Ok(validated) => {
+                    let forwards = validated
+                        .iter()
+                        .map(|forward| {
+                            (
+                                forward
+                                    .local_host
+                                    .clone()
+                                    .unwrap_or_else(|| "127.0.0.1".to_string()),
+                                forward.local_port,
+                                forward
+                                    .remote_host
+                                    .clone()
+                                    .unwrap_or_else(|| "localhost".to_string()),
+                                forward.remote_port,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let start_task = remote_client
+                        .read_with(cx, |client, cx| client.start_port_forwarding(forwards, cx));
+                    match start_task.await {
+                        Ok(()) => Ok::<_, anyhow::Error>(validated),
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            };
 
             this.update(cx, |this, cx| match apply_result {
-                Ok(child) => {
-                    this.active_child = Some(child);
+                Ok(_) => {
                     this.status_by_forward = this
                         .desired_forwards
                         .iter()
@@ -174,8 +190,8 @@ impl PortForwardManager {
                 }
                 Err(err) => {
                     let error_message = format!("{err:#}");
-                    this.desired_forwards = previous_desired.clone();
-                    this.status_by_forward = previous_desired
+                    this.status_by_forward = this
+                        .desired_forwards
                         .iter()
                         .cloned()
                         .map(|spec| PortForwardStatus {
@@ -193,10 +209,16 @@ impl PortForwardManager {
         .detach();
     }
 
-    fn stop_active_child(&mut self) {
-        if let Some(mut child) = self.active_child.take() {
-            let _ = child.kill();
-        }
+    fn stop_active_forwards(&self, cx: &mut Context<Self>) {
+        let remote_client = self.remote_client.clone();
+        cx.spawn(async move |_, cx| {
+            let stop_task =
+                remote_client.read_with(cx, |client, cx| client.stop_port_forwarding(cx));
+            if let Err(error) = stop_task.await {
+                log::warn!("[Zed iOS] Failed to stop port forwarding: {error:#}");
+            }
+        })
+        .detach();
     }
 }
 

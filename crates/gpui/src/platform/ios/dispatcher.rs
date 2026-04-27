@@ -3,8 +3,8 @@
 //! This is nearly identical to the macOS dispatcher since GCD is available on both platforms.
 
 use crate::{
-    PlatformDispatcher, Priority, RealtimePriority, RunnableMeta, RunnableVariant,
-    TaskLabel, TaskTiming, ThreadTaskTimings, GLOBAL_THREAD_TIMINGS, THREAD_TIMINGS,
+    GLOBAL_THREAD_TIMINGS, PlatformDispatcher, Priority, RunnableMeta, RunnableVariant,
+    THREAD_TIMINGS, TaskTiming, ThreadTaskTimings,
 };
 use async_task::Runnable;
 use objc::{
@@ -72,16 +72,25 @@ impl PlatformDispatcher for IosDispatcher {
         ThreadTaskTimings::convert(&global_timings)
     }
 
-    fn get_current_thread_timings(&self) -> Vec<TaskTiming> {
+    fn get_current_thread_timings(&self) -> ThreadTaskTimings {
         THREAD_TIMINGS.with(|timings| {
-            let timings = &timings.lock().timings;
+            let timings = timings.lock();
+            let thread_name = timings.thread_name.clone();
+            let total_pushed = timings.total_pushed;
+            let timings = &timings.timings;
 
             let mut vec = Vec::with_capacity(timings.len());
 
             let (s1, s2) = timings.as_slices();
             vec.extend_from_slice(s1);
             vec.extend_from_slice(s2);
-            vec
+
+            ThreadTaskTimings {
+                thread_name,
+                thread_id: std::thread::current().id(),
+                timings: vec,
+                total_pushed,
+            }
         })
     }
 
@@ -90,20 +99,12 @@ impl PlatformDispatcher for IosDispatcher {
         is_main_thread == YES
     }
 
-    fn dispatch(&self, runnable: RunnableVariant, _label: Option<TaskLabel>, priority: Priority) {
-        let (context, trampoline) = match runnable {
-            RunnableVariant::Meta(runnable) => (
-                runnable.into_raw().as_ptr() as *mut c_void,
-                Some(trampoline as unsafe extern "C" fn(*mut c_void)),
-            ),
-            RunnableVariant::Compat(runnable) => (
-                runnable.into_raw().as_ptr() as *mut c_void,
-                Some(trampoline_compat as unsafe extern "C" fn(*mut c_void)),
-            ),
-        };
-
+    fn dispatch(&self, runnable: RunnableVariant, priority: Priority) {
+        let context = runnable.into_raw().as_ptr() as *mut c_void;
         let queue_priority = match priority {
-            Priority::Realtime(_) => unreachable!(),
+            Priority::RealtimeAudio => {
+                panic!("RealtimeAudio priority should use spawn_realtime, not dispatch")
+            }
             Priority::High => DISPATCH_QUEUE_PRIORITY_HIGH,
             Priority::Medium => DISPATCH_QUEUE_PRIORITY_DEFAULT,
             Priority::Low => DISPATCH_QUEUE_PRIORITY_LOW,
@@ -113,46 +114,28 @@ impl PlatformDispatcher for IosDispatcher {
             dispatch_async_f(
                 dispatch_get_global_queue(queue_priority, 0),
                 context,
-                trampoline,
+                Some(trampoline),
             );
         }
     }
 
     fn dispatch_on_main_thread(&self, runnable: RunnableVariant, _priority: Priority) {
-        let (context, trampoline) = match runnable {
-            RunnableVariant::Meta(runnable) => (
-                runnable.into_raw().as_ptr() as *mut c_void,
-                Some(trampoline as unsafe extern "C" fn(*mut c_void)),
-            ),
-            RunnableVariant::Compat(runnable) => (
-                runnable.into_raw().as_ptr() as *mut c_void,
-                Some(trampoline_compat as unsafe extern "C" fn(*mut c_void)),
-            ),
-        };
+        let context = runnable.into_raw().as_ptr() as *mut c_void;
         unsafe {
-            dispatch_async_f(dispatch_get_main_queue(), context, trampoline);
+            dispatch_async_f(dispatch_get_main_queue(), context, Some(trampoline));
         }
     }
 
     fn dispatch_after(&self, duration: Duration, runnable: RunnableVariant) {
-        let (context, trampoline) = match runnable {
-            RunnableVariant::Meta(runnable) => (
-                runnable.into_raw().as_ptr() as *mut c_void,
-                Some(trampoline as unsafe extern "C" fn(*mut c_void)),
-            ),
-            RunnableVariant::Compat(runnable) => (
-                runnable.into_raw().as_ptr() as *mut c_void,
-                Some(trampoline_compat as unsafe extern "C" fn(*mut c_void)),
-            ),
-        };
+        let context = runnable.into_raw().as_ptr() as *mut c_void;
         unsafe {
             let queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0);
             let when = dispatch_time(DISPATCH_TIME_NOW, duration.as_nanos() as i64);
-            dispatch_after_f(when, queue, context, trampoline);
+            dispatch_after_f(when, queue, context, Some(trampoline));
         }
     }
 
-    fn spawn_realtime(&self, _priority: RealtimePriority, f: Box<dyn FnOnce() + Send>) {
+    fn spawn_realtime(&self, f: Box<dyn FnOnce() + Send>) {
         std::thread::spawn(move || {
             f();
         });
@@ -160,16 +143,9 @@ impl PlatformDispatcher for IosDispatcher {
 }
 
 extern "C" fn trampoline(runnable: *mut c_void) {
-    let task =
+    let runnable =
         unsafe { Runnable::<RunnableMeta>::from_raw(NonNull::new_unchecked(runnable as *mut ())) };
-
-    let metadata = task.metadata();
-    let location = metadata.location;
-
-    if !metadata.is_app_alive() {
-        drop(task);
-        return;
-    }
+    let location = runnable.metadata().location;
 
     let start = Instant::now();
     let timing = TaskTiming {
@@ -190,43 +166,7 @@ extern "C" fn trampoline(runnable: *mut c_void) {
         timings.push_back(timing);
     });
 
-    task.run();
-    let end = Instant::now();
-
-    THREAD_TIMINGS.with(|timings| {
-        let mut timings = timings.lock();
-        let timings = &mut timings.timings;
-        let Some(last_timing) = timings.iter_mut().rev().next() else {
-            return;
-        };
-        last_timing.end = Some(end);
-    });
-}
-
-extern "C" fn trampoline_compat(runnable: *mut c_void) {
-    let task = unsafe { Runnable::<()>::from_raw(NonNull::new_unchecked(runnable as *mut ())) };
-
-    let location = core::panic::Location::caller();
-
-    let start = Instant::now();
-    let timing = TaskTiming {
-        location,
-        start,
-        end: None,
-    };
-    THREAD_TIMINGS.with(|timings| {
-        let mut timings = timings.lock();
-        let timings = &mut timings.timings;
-        if let Some(last_timing) = timings.iter_mut().rev().next() {
-            if last_timing.location == timing.location {
-                return;
-            }
-        }
-
-        timings.push_back(timing);
-    });
-
-    task.run();
+    runnable.run();
     let end = Instant::now();
 
     THREAD_TIMINGS.with(|timings| {

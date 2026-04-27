@@ -13,23 +13,24 @@ use futures::{
     channel::{mpsc, oneshot},
 };
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Task, Window,
-    div, img, prelude::*, px,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, PathPromptOptions,
+    Render, Task, Window, div, img, prelude::*, px,
 };
 use http_client::HttpClient;
 use remote::{
     HostKeyChallenge, HostKeyDecision, RemoteClient, RemoteConnectionOptions, SshConnectionOptions,
-    SshPortForwardOption,
+    SshKeyAuth, SshPortForwardOption,
 };
-use std::sync::Arc;
+use russh::keys::{PublicKeyBase64, decode_secret_key};
+use sha2::Digest as _;
+use std::{path::PathBuf, sync::Arc};
 use theme::ActiveTheme;
-use util::shell::ShellKind;
 
 use crate::ios_app_version_string;
 use crate::mobile_feature_policy::MobileFeaturePolicy;
 use crate::persistence::{
     AuthMode, ConnectionDb, ConnectionProfile, ConnectionProfileInput, SessionRestoreState,
-    credential_url,
+    credential_url, private_key_credential_url, private_key_passphrase_url,
 };
 use crate::remote_delegate::{HostKeyPromptRequest, IosRemoteClientDelegate};
 use crate::text_input::TextInput;
@@ -39,14 +40,24 @@ fn create_http_client() -> Arc<dyn HttpClient> {
     Arc::new(reqwest_client::ReqwestClient::new())
 }
 
-fn parse_ssh_args(raw: &str) -> Result<Vec<String>, String> {
-    if raw.trim().is_empty() {
-        return Ok(Vec::new());
-    }
+fn optional_secret(raw: &str) -> Option<String> {
+    (!raw.is_empty()).then(|| raw.to_string())
+}
 
-    ShellKind::Posix
-        .split(raw)
-        .ok_or_else(|| "Invalid SSH args: unmatched quotes or escape sequence".to_string())
+fn private_key_metadata(
+    private_key: &str,
+    passphrase: Option<&str>,
+) -> Result<(String, String), String> {
+    let private_key = decode_secret_key(private_key, passphrase)
+        .map_err(|error| format!("Invalid SSH private key or passphrase: {error}"))?;
+    let fingerprint = hex::encode(sha2::Sha256::digest(private_key.public_key_bytes()));
+    Ok((private_key.algorithm().to_string(), fingerprint))
+}
+
+fn file_name_label(path: &PathBuf) -> Option<String> {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|label| !label.is_empty())
 }
 
 pub(crate) fn parse_port_forward_spec(spec: &str) -> Result<SshPortForwardOption, String> {
@@ -156,9 +167,9 @@ pub struct ConnectView {
     username_input: Entity<TextInput>,
     port_input: Entity<TextInput>,
     nickname_input: Entity<TextInput>,
-    ssh_args_input: Entity<TextInput>,
     port_forwards_input: Entity<TextInput>,
     password_input: Entity<TextInput>,
+    key_passphrase_input: Entity<TextInput>,
     remote_path_input: Entity<TextInput>,
     state: ConnectionState,
     status_message: Option<String>,
@@ -171,8 +182,12 @@ pub struct ConnectView {
     password_tx: Option<oneshot::Sender<EncryptedPassword>>,
     connection_task: Option<Task<()>>,
     show_advanced_options: bool,
+    auth_mode: AuthMode,
     remember_secret: bool,
     upload_binary_over_ssh: bool,
+    pending_private_key_text: Option<String>,
+    private_key_name: Option<String>,
+    private_key_fingerprint: Option<String>,
     pending_secret_for_save: Option<String>,
     pending_host_key_fingerprint: Option<String>,
     auto_restore_attempted: bool,
@@ -193,15 +208,17 @@ impl ConnectView {
 
         let nickname_input = cx.new(|cx| TextInput::new("Work Mac", cx).with_label("Nickname"));
 
-        let ssh_args_input =
-            cx.new(|cx| TextInput::new("-i ~/.ssh/id_ed25519", cx).with_label("SSH Args"));
-
         let port_forwards_input =
             cx.new(|cx| TextInput::new("3000:3000, 5173:5173", cx).with_label("Port Forwards"));
 
         let password_input = cx.new(|cx| {
             TextInput::new("", cx)
                 .with_label("Password")
+                .with_secure(true)
+        });
+        let key_passphrase_input = cx.new(|cx| {
+            TextInput::new("", cx)
+                .with_label("Key Passphrase")
                 .with_secure(true)
         });
 
@@ -251,29 +268,40 @@ impl ConnectView {
                     cx,
                 );
             });
-            ssh_args_input.update(cx, |input, cx| {
-                input.set_text(profile.ssh_args.join(" "), cx);
-            });
             port_forwards_input.update(cx, |input, cx| {
                 input.set_text(format_port_forwards(&profile.port_forwards), cx);
             });
         }
 
+        let auth_mode = if last_session_profile
+            .as_ref()
+            .is_some_and(|profile| matches!(profile.auth_mode, AuthMode::KeyBased))
+        {
+            AuthMode::KeyBased
+        } else {
+            AuthMode::Prompt
+        };
         let remember_secret = last_session_profile
             .as_ref()
             .is_some_and(|profile| matches!(profile.auth_mode, AuthMode::KeychainSecret));
         let upload_binary_over_ssh = last_session_profile
             .as_ref()
             .is_some_and(|profile| profile.upload_binary_over_ssh);
+        let private_key_name = last_session_profile
+            .as_ref()
+            .and_then(|profile| profile.private_key_name.clone());
+        let private_key_fingerprint = last_session_profile
+            .as_ref()
+            .and_then(|profile| profile.private_key_fingerprint.clone());
 
         Self {
             hostname_input,
             username_input,
             port_input,
             nickname_input,
-            ssh_args_input,
             port_forwards_input,
             password_input,
+            key_passphrase_input,
             state: ConnectionState::Idle,
             status_message: None,
             recent_connections,
@@ -286,8 +314,12 @@ impl ConnectView {
             connection_task: None,
             remote_path_input,
             show_advanced_options: false,
+            auth_mode,
             remember_secret,
             upload_binary_over_ssh,
+            pending_private_key_text: None,
+            private_key_name,
+            private_key_fingerprint,
             pending_secret_for_save: None,
             pending_host_key_fingerprint: None,
             auto_restore_attempted: false,
@@ -312,6 +344,65 @@ impl ConnectView {
         }
     }
 
+    fn selected_auth_mode(&self) -> AuthMode {
+        if matches!(self.auth_mode, AuthMode::KeyBased) {
+            AuthMode::KeyBased
+        } else if self.remember_secret {
+            AuthMode::KeychainSecret
+        } else {
+            AuthMode::Prompt
+        }
+    }
+
+    async fn load_saved_ssh_key_auth(
+        private_key_store_url: &str,
+        passphrase_store_url: &str,
+        display_name: Option<String>,
+        fingerprint_sha256: Option<String>,
+        cx: &mut gpui::AsyncApp,
+    ) -> Result<Option<SshKeyAuth>> {
+        let private_key = match cx
+            .update(|cx| cx.read_credentials(private_key_store_url))
+            .await
+        {
+            Ok(Some((_stored_username, secret_bytes))) => {
+                String::from_utf8(secret_bytes).map_err(|error| anyhow::anyhow!(error))?
+            }
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to read saved SSH private key for {}: {}",
+                    private_key_store_url,
+                    error
+                ));
+            }
+        };
+
+        let passphrase = match cx
+            .update(|cx| cx.read_credentials(passphrase_store_url))
+            .await
+        {
+            Ok(Some((_stored_username, secret_bytes))) => {
+                Some(String::from_utf8(secret_bytes).map_err(|error| anyhow::anyhow!(error))?)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to read saved SSH key passphrase for {}: {}",
+                    passphrase_store_url,
+                    error
+                ));
+            }
+        };
+
+        Ok(Some(SshKeyAuth {
+            private_key,
+            passphrase,
+            display_name,
+            fingerprint_sha256,
+        }))
+    }
+
     /// Validates the current input
     fn validate_input(&self, cx: &App) -> Result<(), String> {
         let hostname = self.hostname_input.read(cx).text();
@@ -327,6 +418,13 @@ impl ConnectView {
         if port_str.parse::<u16>().is_err() {
             return Err("Invalid port number".to_string());
         }
+        if matches!(self.auth_mode, AuthMode::KeyBased)
+            && self.pending_private_key_text.is_none()
+            && self.private_key_name.is_none()
+            && self.private_key_fingerprint.is_none()
+        {
+            return Err("Paste an SSH private key to use key-based auth.".to_string());
+        }
         Ok(())
     }
 
@@ -337,9 +435,24 @@ impl ConnectView {
         let username = self.username_input.read(cx).text().trim().to_string();
         let port = self.port_input.read(cx).text().parse().unwrap_or(22);
         let nickname = self.nickname_input.read(cx).text().trim().to_string();
-        let ssh_args = parse_ssh_args(self.ssh_args_input.read(cx).text())?;
         let port_forwards = parse_port_forwards(self.port_forwards_input.read(cx).text())?;
         let default_path = self.connection_path(cx);
+        let passphrase = optional_secret(self.key_passphrase_input.read(cx).text());
+        let (private_key_name, private_key_fingerprint) =
+            if matches!(self.auth_mode, AuthMode::KeyBased) {
+                if let Some(private_key) = self.pending_private_key_text.as_deref() {
+                    let (private_key_name, private_key_fingerprint) =
+                        private_key_metadata(private_key, passphrase.as_deref())?;
+                    (Some(private_key_name), Some(private_key_fingerprint))
+                } else {
+                    (
+                        self.private_key_name.clone(),
+                        self.private_key_fingerprint.clone(),
+                    )
+                }
+            } else {
+                (None, None)
+            };
 
         Ok(ConnectionProfileInput {
             hostname,
@@ -347,14 +460,12 @@ impl ConnectView {
             port,
             nickname: (!nickname.is_empty()).then_some(nickname),
             default_path: Some(default_path.clone()),
-            ssh_args,
+            ssh_args: Vec::new(),
             port_forwards,
-            auth_mode: if self.remember_secret {
-                AuthMode::KeychainSecret
-            } else {
-                AuthMode::Prompt
-            },
+            auth_mode: self.selected_auth_mode(),
             upload_binary_over_ssh: self.upload_binary_over_ssh,
+            private_key_name,
+            private_key_fingerprint,
             last_successful_server_version: Some(ios_app_version_string().to_string()),
             last_opened_worktree: Some(default_path),
         })
@@ -376,7 +487,7 @@ impl ConnectView {
             username: Some(profile_input.username.clone()),
             port: Some(profile_input.port),
             password: None,
-            args: Some(profile_input.ssh_args.clone()),
+            args: None,
             port_forwards: (!profile_input.port_forwards.is_empty())
                 .then_some(profile_input.port_forwards.clone()),
             connection_timeout: Some(30),
@@ -389,11 +500,24 @@ impl ConnectView {
             &profile_input.username,
             profile_input.port,
         );
-        let should_read_keychain = matches!(profile_input.auth_mode, AuthMode::KeychainSecret);
+        let private_key_store_url = private_key_credential_url(
+            &profile_input.hostname,
+            &profile_input.username,
+            profile_input.port,
+        );
+        let private_key_passphrase_store_url = private_key_passphrase_url(
+            &profile_input.hostname,
+            &profile_input.username,
+            profile_input.port,
+        );
+        let should_read_password = matches!(profile_input.auth_mode, AuthMode::KeychainSecret);
+        let should_read_private_key = matches!(profile_input.auth_mode, AuthMode::KeyBased);
         let remote_path = profile_input
             .default_path
             .clone()
             .unwrap_or_else(|| "~".to_string());
+        let pending_private_key_text = self.pending_private_key_text.clone();
+        let private_key_passphrase = optional_secret(self.key_passphrase_input.read(cx).text());
 
         self.state = ConnectionState::Connecting;
         self.status_message = Some("Initializing connection...".to_string());
@@ -408,8 +532,12 @@ impl ConnectView {
         let (host_key_prompt_tx, mut host_key_prompt_rx) =
             mpsc::unbounded::<HostKeyPromptRequest>();
         let credential_store_url_for_task = credential_store_url.clone();
+        let private_key_store_url_for_task = private_key_store_url.clone();
+        let private_key_passphrase_store_url_for_task = private_key_passphrase_store_url.clone();
         let profile_input_for_task = profile_input.clone();
         let username_for_keychain = profile_input.username.clone();
+        let pending_private_key_text_for_task = pending_private_key_text.clone();
+        let private_key_passphrase_for_task = private_key_passphrase.clone();
 
         cx.spawn(async move |this, cx| {
             while let Some(HostKeyPromptRequest { challenge, tx }) = host_key_prompt_rx.next().await
@@ -435,7 +563,7 @@ impl ConnectView {
         .detach();
 
         let connection_task = cx.spawn(async move |this, cx| {
-            let known_password = if should_read_keychain {
+            let known_password = if should_read_password {
                 match cx
                     .update(|cx| cx.read_credentials(&credential_store_url_for_task))
                     .await
@@ -457,20 +585,58 @@ impl ConnectView {
                 None
             };
 
-            let delegate = Arc::new(IosRemoteClientDelegate::new(
-                window_handle,
-                this_weak,
-                known_password,
-                host_key_prompt_tx,
-                http_client,
-            ));
+            let known_private_key = if should_read_private_key {
+                if let Some(private_key) = pending_private_key_text_for_task.clone() {
+                    Some(SshKeyAuth {
+                        private_key,
+                        passphrase: private_key_passphrase_for_task.clone(),
+                        display_name: profile_input_for_task.private_key_name.clone(),
+                        fingerprint_sha256: profile_input_for_task.private_key_fingerprint.clone(),
+                    })
+                } else {
+                    match Self::load_saved_ssh_key_auth(
+                        &private_key_store_url_for_task,
+                        &private_key_passphrase_store_url_for_task,
+                        profile_input_for_task.private_key_name.clone(),
+                        profile_input_for_task.private_key_fingerprint.clone(),
+                        cx,
+                    )
+                    .await
+                    {
+                        Ok(known_private_key) => known_private_key,
+                        Err(error) => {
+                            log::warn!("[Zed iOS] Failed to load saved SSH key: {error:#}");
+                            None
+                        }
+                    }
+                }
+            } else {
+                None
+            };
 
-            let result = Self::perform_connection(
-                RemoteConnectionOptions::Ssh(connection_options),
-                delegate,
-                cx,
-            )
-            .await;
+            let result = if should_read_private_key && known_private_key.is_none() {
+                Err(anyhow::anyhow!(
+                    "No SSH private key is available for {}@{}.",
+                    profile_input_for_task.username,
+                    profile_input_for_task.hostname
+                ))
+            } else {
+                let delegate = Arc::new(IosRemoteClientDelegate::new(
+                    window_handle,
+                    this_weak,
+                    known_password,
+                    known_private_key,
+                    host_key_prompt_tx,
+                    http_client,
+                ));
+
+                Self::perform_connection(
+                    RemoteConnectionOptions::Ssh(connection_options),
+                    delegate,
+                    cx,
+                )
+                .await
+            };
 
             this.update(cx, |this, cx| {
                 match result {
@@ -521,12 +687,104 @@ impl ConnectView {
                                 })
                                 .detach();
                             }
-                        } else {
+                            let delete_private_key_task =
+                                cx.delete_credentials(&private_key_store_url);
+                            let delete_passphrase_task =
+                                cx.delete_credentials(&private_key_passphrase_store_url);
+                            cx.spawn(async move |_, _| {
+                                if let Err(err) = delete_private_key_task.await {
+                                    log::debug!(
+                                        "[Zed iOS] Failed to clear saved SSH key: {}",
+                                        err
+                                    );
+                                }
+                                if let Err(err) = delete_passphrase_task.await {
+                                    log::debug!(
+                                        "[Zed iOS] Failed to clear saved SSH key passphrase: {}",
+                                        err
+                                    );
+                                }
+                            })
+                            .detach();
+                        } else if matches!(profile_input_for_task.auth_mode, AuthMode::KeyBased) {
                             let delete_task = cx.delete_credentials(&credential_store_url);
                             cx.spawn(async move |_, _| {
                                 if let Err(err) = delete_task.await {
                                     log::debug!(
                                         "[Zed iOS] Failed to clear saved SSH secret: {}",
+                                        err
+                                    );
+                                }
+                            })
+                            .detach();
+
+                            if let Some(private_key) = pending_private_key_text.clone() {
+                                let write_key_task = cx.write_credentials(
+                                    &private_key_store_url,
+                                    &username_for_keychain,
+                                    private_key.as_bytes(),
+                                );
+                                cx.spawn(async move |_, _| {
+                                    if let Err(err) = write_key_task.await {
+                                        log::warn!(
+                                            "[Zed iOS] Failed to store SSH key in Keychain: {}",
+                                            err
+                                        );
+                                    }
+                                })
+                                .detach();
+                            }
+
+                            if let Some(passphrase) = private_key_passphrase.clone() {
+                                let write_passphrase_task = cx.write_credentials(
+                                    &private_key_passphrase_store_url,
+                                    &username_for_keychain,
+                                    passphrase.as_bytes(),
+                                );
+                                cx.spawn(async move |_, _| {
+                                    if let Err(err) = write_passphrase_task.await {
+                                        log::warn!(
+                                            "[Zed iOS] Failed to store SSH key passphrase in Keychain: {}",
+                                            err
+                                        );
+                                    }
+                                })
+                                .detach();
+                            } else if pending_private_key_text.is_some() {
+                                let delete_passphrase_task =
+                                    cx.delete_credentials(&private_key_passphrase_store_url);
+                                cx.spawn(async move |_, _| {
+                                    if let Err(err) = delete_passphrase_task.await {
+                                        log::debug!(
+                                            "[Zed iOS] Failed to clear saved SSH key passphrase: {}",
+                                            err
+                                        );
+                                    }
+                                })
+                                .detach();
+                            }
+                        } else {
+                            let delete_task = cx.delete_credentials(&credential_store_url);
+                            let delete_private_key_task =
+                                cx.delete_credentials(&private_key_store_url);
+                            let delete_passphrase_task =
+                                cx.delete_credentials(&private_key_passphrase_store_url);
+                            cx.spawn(async move |_, _| {
+                                if let Err(err) = delete_task.await {
+                                    log::debug!(
+                                        "[Zed iOS] Failed to clear saved SSH secret: {}",
+                                        err
+                                    );
+                                }
+                                if let Err(err) = delete_private_key_task.await {
+                                    log::debug!(
+                                        "[Zed iOS] Failed to clear saved SSH key: {}",
+                                        err
+                                    );
+                                }
+                                if let Err(err) = delete_passphrase_task.await {
+                                    log::debug!(
+                                        "[Zed iOS] Failed to clear saved SSH key passphrase: {}",
                                         err
                                     );
                                 }
@@ -676,6 +934,16 @@ impl ConnectView {
         cx.notify();
     }
 
+    fn use_password_auth(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.auth_mode = AuthMode::Prompt;
+        cx.notify();
+    }
+
+    fn use_key_auth(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.auth_mode = AuthMode::KeyBased;
+        cx.notify();
+    }
+
     fn toggle_remember_secret(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.remember_secret = !self.remember_secret;
         if !self.remember_secret {
@@ -687,6 +955,120 @@ impl ConnectView {
     fn toggle_upload_binary_over_ssh(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.upload_binary_over_ssh = !self.upload_binary_over_ssh;
         cx.notify();
+    }
+
+    fn apply_imported_private_key(
+        &mut self,
+        private_key: String,
+        source_label: Option<String>,
+        imported_from: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !private_key.contains("PRIVATE KEY") {
+            self.state = ConnectionState::Error(format!(
+                "The selected {imported_from} does not contain an OpenSSH private key."
+            ));
+            self.status_message = None;
+            cx.notify();
+            return;
+        }
+
+        self.pending_private_key_text = Some(private_key.clone());
+        self.auth_mode = AuthMode::KeyBased;
+
+        let passphrase = optional_secret(self.key_passphrase_input.read(cx).text());
+        match private_key_metadata(&private_key, passphrase.as_deref()) {
+            Ok((private_key_name, private_key_fingerprint)) => {
+                self.private_key_name = Some(private_key_name);
+                self.private_key_fingerprint = Some(private_key_fingerprint);
+                self.status_message = Some(format!("SSH key imported from {imported_from}."));
+                self.state = ConnectionState::Idle;
+            }
+            Err(_) => {
+                self.private_key_name =
+                    source_label.or_else(|| Some("Imported SSH key".to_string()));
+                self.private_key_fingerprint = None;
+                self.status_message = Some(format!(
+                    "SSH key imported from {imported_from}. Enter its passphrase if it is encrypted."
+                ));
+                self.state = ConnectionState::Idle;
+            }
+        }
+
+        cx.notify();
+    }
+
+    fn import_private_key_from_clipboard(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(private_key) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            self.state = ConnectionState::Error("Clipboard does not contain text.".to_string());
+            self.status_message = None;
+            cx.notify();
+            return;
+        };
+
+        self.apply_imported_private_key(private_key, None, "clipboard", cx);
+    }
+
+    fn import_private_key_from_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import SSH Key".into()),
+        });
+
+        cx.spawn(async move |this, cx| {
+            let selected_path = match picker.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => None,
+                Ok(Err(error)) => {
+                    let message = format!("Failed to open the SSH key picker: {error:#}");
+                    this.update(cx, |this, cx| {
+                        this.state = ConnectionState::Error(message.clone());
+                        this.status_message = None;
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                Err(error) => {
+                    let message = format!("The SSH key picker was dismissed unexpectedly: {error}");
+                    this.update(cx, |this, cx| {
+                        this.state = ConnectionState::Error(message.clone());
+                        this.status_message = None;
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let Some(path) = selected_path else {
+                return;
+            };
+
+            let source_label = file_name_label(&path);
+            let private_key = match smol::fs::read_to_string(&path).await {
+                Ok(private_key) => private_key,
+                Err(error) => {
+                    let message =
+                        format!("Failed to read SSH key file {}: {error}", path.display());
+                    this.update(cx, |this, cx| {
+                        this.state = ConnectionState::Error(message.clone());
+                        this.status_message = None;
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            this.update(cx, |this, cx| {
+                this.apply_imported_private_key(private_key, source_label, "file", cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Selects a recent connection
@@ -715,14 +1097,18 @@ impl ConnectView {
         self.nickname_input.update(cx, |input, cx| {
             input.set_text(connection.nickname.clone().unwrap_or_default(), cx);
         });
-        self.ssh_args_input.update(cx, |input, cx| {
-            input.set_text(connection.ssh_args.join(" "), cx);
-        });
         self.port_forwards_input.update(cx, |input, cx| {
             input.set_text(format_port_forwards(&connection.port_forwards), cx);
         });
+        self.key_passphrase_input.update(cx, |input, cx| {
+            input.set_text("", cx);
+        });
+        self.auth_mode = connection.auth_mode.clone();
         self.remember_secret = matches!(connection.auth_mode, AuthMode::KeychainSecret);
         self.upload_binary_over_ssh = connection.upload_binary_over_ssh;
+        self.pending_private_key_text = None;
+        self.private_key_name = connection.private_key_name.clone();
+        self.private_key_fingerprint = connection.private_key_fingerprint.clone();
 
         if let Some(db) = &self.db {
             if let Err(e) = db.touch_connection_profile(connection.id) {
@@ -807,6 +1193,12 @@ impl ConnectView {
             || lower.contains("password")
         {
             "Authentication failed. Check your username, password, or SSH key.".to_string()
+        } else if lower.contains("private key")
+            || lower.contains("public-key")
+            || lower.contains("ssh key")
+        {
+            "SSH key authentication failed. Re-import the key and verify its passphrase."
+                .to_string()
         } else if lower.contains("failed to open project") || lower.contains("worktree") {
             "Connected to the server, but opening the remote workspace failed.".to_string()
         } else if lower.contains("timed out") || lower.contains("timeout") {
@@ -894,6 +1286,150 @@ impl ConnectView {
             )
     }
 
+    fn render_auth_mode_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        selected: bool,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let background = if selected {
+            colors.text_accent
+        } else {
+            colors.element_background
+        };
+        let foreground = if selected {
+            colors.background
+        } else {
+            colors.text
+        };
+
+        div()
+            .id(id)
+            .flex_1()
+            .px(px(14.0))
+            .py(px(12.0))
+            .rounded(px(10.0))
+            .bg(background)
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _event, window, cx| on_click(this, window, cx)))
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_center()
+                    .text_color(foreground)
+                    .child(label),
+            )
+    }
+
+    fn render_key_auth_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let text_color = colors.text;
+        let muted_color = colors.text_muted;
+        let surface_color = colors.element_background;
+        let hover_color = colors.element_hover;
+
+        let private_key_label = self
+            .private_key_name
+            .clone()
+            .unwrap_or_else(|| "No SSH key imported yet".to_string());
+        let private_key_detail = self
+            .private_key_fingerprint
+            .clone()
+            .map(|fingerprint| format!("SHA-256: {fingerprint}"))
+            .unwrap_or_else(|| {
+                "Paste a private key or import one from Files to use key auth.".to_string()
+            });
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(muted_color)
+                    .child("SSH keys are stored in Keychain for this saved connection."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .id("paste-private-key-button")
+                            .w_full()
+                            .px(px(16.0))
+                            .py(px(12.0))
+                            .rounded(px(10.0))
+                            .bg(surface_color)
+                            .hover(|style| style.bg(hover_color))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.import_private_key_from_clipboard(window, cx);
+                            }))
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(text_color)
+                                    .text_center()
+                                    .child("Paste SSH Key From Clipboard"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("import-private-key-file-button")
+                            .w_full()
+                            .px(px(16.0))
+                            .py(px(12.0))
+                            .rounded(px(10.0))
+                            .bg(surface_color)
+                            .hover(|style| style.bg(hover_color))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.import_private_key_from_file(window, cx);
+                            }))
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(text_color)
+                                    .text_center()
+                                    .child("Import SSH Key From Files"),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .px(px(14.0))
+                    .py(px(12.0))
+                    .rounded(px(10.0))
+                    .bg(surface_color)
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(text_color)
+                            .child(private_key_label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(muted_color)
+                            .child(private_key_detail),
+                    ),
+            )
+            .child(self.key_passphrase_input.clone())
+    }
+
     fn render_connection_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -910,13 +1446,37 @@ impl ConnectView {
                     .child(div().w(px(100.0)).child(self.port_input.clone())),
             )
             .child(self.remote_path_input.clone())
-            .child(self.render_toggle(
-                "remember-secret-toggle",
-                "Remember password in Keychain",
-                self.remember_secret,
-                cx,
-                |this, window, cx| this.toggle_remember_secret(window, cx),
-            ))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(12.0))
+                    .child(self.render_auth_mode_button(
+                        "auth-password-button",
+                        "Password",
+                        !matches!(self.auth_mode, AuthMode::KeyBased),
+                        cx,
+                        |this, window, cx| this.use_password_auth(window, cx),
+                    ))
+                    .child(self.render_auth_mode_button(
+                        "auth-key-button",
+                        "SSH Key",
+                        matches!(self.auth_mode, AuthMode::KeyBased),
+                        cx,
+                        |this, window, cx| this.use_key_auth(window, cx),
+                    )),
+            )
+            .when(matches!(self.auth_mode, AuthMode::KeyBased), |el| {
+                el.child(self.render_key_auth_section(cx))
+            })
+            .when(!matches!(self.auth_mode, AuthMode::KeyBased), |el| {
+                el.child(self.render_toggle(
+                    "remember-secret-toggle",
+                    "Remember password in Keychain",
+                    self.remember_secret,
+                    cx,
+                    |this, window, cx| this.toggle_remember_secret(window, cx),
+                ))
+            })
             .child(
                 div()
                     .id("advanced-toggle")
@@ -943,7 +1503,21 @@ impl ConnectView {
             )
             .when(self.show_advanced_options, |el| {
                 el.child(self.nickname_input.clone())
-                    .child(self.ssh_args_input.clone())
+                    .child(
+                        div()
+                            .px(px(14.0))
+                            .py(px(12.0))
+                            .rounded(px(10.0))
+                            .bg(cx.theme().colors().element_background)
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(cx.theme().colors().text_muted)
+                                    .child(
+                                        "Generic SSH args are disabled on iPad. Use the structured host, auth, and port-forward fields instead.",
+                                    ),
+                            ),
+                    )
                     .child(self.port_forwards_input.clone())
                     .child(self.render_toggle(
                         "upload-binary-toggle",
@@ -1010,13 +1584,15 @@ impl ConnectView {
                         .child(prompt.clone()),
                 )
                 .child(self.password_input.clone())
-                .child(self.render_toggle(
-                    "password-remember-toggle",
-                    "Remember this password",
-                    self.remember_secret,
-                    cx,
-                    |this, window, cx| this.toggle_remember_secret(window, cx),
-                ))
+                .when(!matches!(self.auth_mode, AuthMode::KeyBased), |el| {
+                    el.child(self.render_toggle(
+                        "password-remember-toggle",
+                        "Remember this password",
+                        self.remember_secret,
+                        cx,
+                        |this, window, cx| this.toggle_remember_secret(window, cx),
+                    ))
+                })
                 .child(
                     div()
                         .id("submit-password-button")

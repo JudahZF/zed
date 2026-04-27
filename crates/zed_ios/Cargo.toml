@@ -38,7 +38,9 @@ git_ui.workspace = true
 language.workspace = true
 language_model.workspace = true
 language_models.workspace = true
+languages.workspace = true
 language_tools.workspace = true
+libc.workspace = true
 log.workspace = true
 node_runtime.workspace = true
 outline.workspace = true
@@ -51,6 +53,7 @@ prompt_store.workspace = true
 release_channel.workspace = true
 remote.workspace = true
 reqwest_client.workspace = true
+russh.workspace = true
 search.workspace = true
 semver.workspace = true
 serde.workspace = true
@@ -75,3 +78,13 @@ zed_actions.workspace = true
 zlog.workspace = true
 
 unicode-segmentation.workspace = true
+
+[dev-dependencies]
+fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["font-kit", "test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+remote_connection = { workspace = true, features = ["test-support"] }
+session = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+workspace = { workspace = true, features = ["test-support"] }

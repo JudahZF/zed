@@ -20,6 +20,19 @@ if ! command -v xcrun >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "error: cargo is not available. Install Rust via https://rustup.rs first." >&2
+  exit 1
+fi
+
+if ! command -v rustup >/dev/null 2>&1; then
+  echo "error: rustup is not available." >&2
+  echo "A rustup-managed Rust toolchain is required for iOS development so the required Rust targets can be validated and installed." >&2
+  echo "Install Rust via https://rustup.rs and then run:" >&2
+  echo "  rustup target add aarch64-apple-ios-sim aarch64-apple-ios" >&2
+  exit 1
+fi
+
 developer_dir="$(xcode-select -p 2>/dev/null || true)"
 if [[ -z "${developer_dir}" ]]; then
   echo "error: no active Xcode developer directory is configured." >&2
@@ -88,12 +101,33 @@ if [[ "${missing_metal}" == true ]]; then
   fi
 fi
 
+required_rust_targets=(
+  aarch64-apple-ios-sim
+  aarch64-apple-ios
+)
+
 echo
 echo "Installed Rust Apple targets:"
-if command -v rustup >/dev/null 2>&1; then
-  rustup target list --installed | rg 'apple-(ios|darwin)' | sed 's/^/  /' || true
-else
-  echo "  rustup not found"
+installed_rust_targets="$(rustup target list --installed)"
+printf '%s\n' "${installed_rust_targets}" | rg 'apple-(ios|darwin)' | sed 's/^/  /' || true
+
+missing_rust_targets=()
+for rust_target in "${required_rust_targets[@]}"; do
+  if ! grep -Fxq "${rust_target}" <<<"${installed_rust_targets}"; then
+    missing_rust_targets+=("${rust_target}")
+  fi
+done
+
+if [[ "${#missing_rust_targets[@]}" -gt 0 ]]; then
+  echo
+  echo "Missing Rust iOS targets:"
+  for rust_target in "${missing_rust_targets[@]}"; do
+    echo "  ${rust_target}"
+  done
+  echo
+  echo "Install them with:"
+  echo "  rustup target add aarch64-apple-ios-sim aarch64-apple-ios"
+  exit 1
 fi
 
 echo

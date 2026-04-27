@@ -8,6 +8,7 @@ use std::{
 };
 
 use crossbeam::queue::ArrayQueue;
+#[cfg(not(target_os = "ios"))]
 use denoise::{Denoiser, DenoiserError};
 use log::warn;
 use rodio::{
@@ -36,6 +37,7 @@ pub trait RodioExt: Source + Sized {
         duration: Duration,
     ) -> Result<(Replay, Replayable<Self>), ReplayDurationTooShort>;
     fn take_samples(self, n: usize) -> TakeSamples<Self>;
+    #[cfg(not(target_os = "ios"))]
     fn denoise(self) -> Result<Denoiser<Self>, DenoiserError>;
     fn constant_params(
         self,
@@ -120,6 +122,7 @@ impl<S: Source> RodioExt for S {
             left_to_take: n,
         }
     }
+    #[cfg(not(target_os = "ios"))]
     fn denoise(self) -> Result<Denoiser<Self>, DenoiserError> {
         let res = Denoiser::try_new(self);
         res

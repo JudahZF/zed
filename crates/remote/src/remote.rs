@@ -8,10 +8,12 @@ mod transport;
 pub use remote_client::OpenWslPath;
 pub use remote_client::{
     CommandTemplate, ConnectionIdentifier, ConnectionState, HostKeyChallenge, HostKeyDecision,
-    Interactive, RecoveryState, RemoteArch, RemoteClient, RemoteClientDelegate,
-    RemoteClientEvent, RemoteConnection, RemoteConnectionOptions, RemoteOs, RemotePlatform,
-    connect,
+    Interactive, RecoveryState, RemoteArch, RemoteClient, RemoteClientDelegate, RemoteClientEvent,
+    RemoteConnection, RemoteConnectionOptions, RemoteOs, RemotePlatform, SshKeyAuth,
+    SshKeyMetadata, connect,
 };
+#[doc(hidden)]
+pub use transport::russh_helper::{RusshHelperFrame, RusshHelperRequest, RusshWindowSize};
 pub use transport::docker::DockerConnectionOptions;
 pub use transport::ssh::{SshConnectionOptions, SshPortForwardOption};
 pub use transport::wsl::WslConnectionOptions;

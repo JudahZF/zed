@@ -19,7 +19,6 @@ collections.workspace = true
 cpal.workspace = true
 crossbeam.workspace = true
 gpui.workspace = true
-denoise = { path = "../denoise" }
 log.workspace = true
 parking_lot.workspace = true
 rodio.workspace = true
@@ -28,6 +27,9 @@ settings.workspace = true
 smol.workspace = true
 thiserror.workspace = true
 util.workspace = true
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+denoise = { path = "../denoise" }
 
 [target.'cfg(not(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd")))'.dependencies]
 libwebrtc.workspace = true

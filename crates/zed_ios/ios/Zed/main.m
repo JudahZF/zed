@@ -8,6 +8,7 @@
 
 // Rust entry point - defined in zed_ios crate
 extern void zed_ios_init(void);
+extern int zed_ios_maybe_run_process_mode(int argc, const char *const argv[]);
 extern void gpui_ios_initialize(void);
 extern void gpui_ios_did_become_active(void);
 extern void gpui_ios_will_resign_active(void);
@@ -75,6 +76,12 @@ extern void gpui_ios_open_url(const char *url);
 
 int main(int argc, char *argv[]) {
     @autoreleasepool {
+        int process_mode_exit_code =
+            zed_ios_maybe_run_process_mode(argc, (const char *const *)argv);
+        if (process_mode_exit_code != -1) {
+            return process_mode_exit_code;
+        }
+
         NSLog(@"[Zed] main() starting UIApplicationMain");
         // UIApplicationMain starts the iOS run loop and never returns.
         // It creates the application object, sets up the event loop,

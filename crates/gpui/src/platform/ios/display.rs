@@ -34,7 +34,7 @@ impl IosDisplay {
         unsafe {
             let screens: *mut Object = msg_send![class!(UIScreen), screens];
             let count: usize = msg_send![screens, count];
-            
+
             (0..count)
                 .map(|i| {
                     let screen: *mut Object = msg_send![screens, objectAtIndex: i];
@@ -79,7 +79,7 @@ impl PlatformDisplay for IosDisplay {
         unsafe {
             let bounds: CGRect = msg_send![self.screen, nativeBounds];
             let scale: f64 = msg_send![self.screen, scale];
-            
+
             // Create a reproducible UUID from screen properties
             let data = format!(
                 "ios-screen-{}-{}-{}",
@@ -87,7 +87,7 @@ impl PlatformDisplay for IosDisplay {
                 bounds.size.height as u32,
                 (scale * 100.0) as u32
             );
-            
+
             Ok(Uuid::new_v5(&Uuid::NAMESPACE_OID, data.as_bytes()))
         }
     }

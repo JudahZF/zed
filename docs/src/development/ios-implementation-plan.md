@@ -1,6 +1,6 @@
 # Zed Mobile (iPad-first) - Status and Remaining Plan
 
-> **Status:** Phases 1-3 are landed in the current tree; phase 4 is in progress; phase 5 is scaffolded
+> **Status:** Phases 1-4 are landed in the current tree for iPad-first remote IDE parity; phase 5 now has repeatable build/archive/upload scripts and mainly depends on Apple signing credentials plus real-device validation
 > **Deployment target:** iOS 18.0 on iPad
 > **Approach:** Remote-first thin client
 > **Renderer:** Native iOS Metal backend in GPUI
@@ -18,7 +18,7 @@ Product naming currently follows this split:
 
 That split is intentional. The app is currently iPad-only in implementation, so the internal crate, static library, C entry point, logs, and persistence stay iOS-specific until there is real shared cross-mobile code.
 
-The app is intentionally remote-first. The iPad client connects to a machine running `zed-remote-server` over SSH, then boots the normal workspace stack against that remote project. Local file picking is intentionally unsupported today.
+The app is intentionally remote-first. The iPad client connects to a machine running `zed-remote-server` over SSH, then boots the normal workspace stack against that remote project. Local project picking remains unsupported; the only local-file prompt currently used on iOS is the narrow SSH private key import flow for remote authentication.
 
 ## Current Architecture
 
@@ -54,9 +54,9 @@ The app is intentionally remote-first. The iPad client connects to a machine run
 |------|--------|-------|
 | 1. GPUI iOS platform layer | Complete | iOS platform, windowing, input, display, text, and Metal renderer modules are present |
 | 2. iOS app crate | Complete | `crates/zed_ios` exists, is in the workspace, and is linked from the iOS project |
-| 3. Connection and tutorial UI | Mostly complete | Connect screen, tutorial, persistence, remote delegate, and workspace bootstrap are implemented |
-| 4. Feature adaptation and polish | In progress | Remote-only enforcement exists, but desktop UI auditing and end-to-end validation still need work |
-| 5. Build and distribution | Scaffolded | Xcode project and Rust static library linkage exist, but signing, CI, bundling, and TestFlight are still open |
+| 3. Connection and tutorial UI | Complete | Connect screen, tutorial, persistence, remote delegate, and workspace bootstrap are implemented |
+| 4. Feature adaptation and polish | Complete | iPad workspace chrome, SSH key import, native port forwarding, diagnostics entry points, native prompts, and restore are implemented |
+| 5. Build and distribution | In progress | Repeatable simulator, device, archive, and TestFlight upload scripts are in-tree; real signing credentials and device/TestFlight execution remain environment-dependent |
 
 ## Landed Work
 
@@ -75,7 +75,8 @@ Important details:
 
 - iOS uses a native Metal renderer in the iOS platform module.
 - Blade is not the renderer on iOS.
-- Local file prompts return an error and direct the user to remote connection instead.
+- Directory-based local workspace prompts remain blocked on iOS, but file-only prompts now support narrow flows such as SSH private key import.
+- Shared prompts can now use native UIKit alerts through `window.rs` instead of always falling back to custom GPUI modal UI.
 
 ### Phase 2: iOS app crate and project wiring
 
@@ -98,20 +99,30 @@ This is also the reason the internal target names remain `zed_ios` for now. `Zed
 
 ### Phase 3: connection flow, tutorial, and workspace bootstrap
 
-The user-facing remote flow is largely implemented:
+The user-facing remote flow is implemented around a remote-first iPad workflow:
 
-- `connect_view.rs` collects host, username, port, password, and remote path
+- `connect_view.rs` collects host, username, port, SSH auth mode, port forwards, and remote path
 - `tutorial_view.rs` renders the setup guide from markdown files under `src/tutorial/`
 - `root_view.rs` switches between connect, tutorial, and workspace states
 - `workspace_view.rs` creates a remote project and replaces the window root with `workspace::Workspace`
 - `remote_delegate.rs` handles password prompts, status updates, and remote server download/caching
 - `persistence.rs` stores recent connections in SQLite
 
+Additional landed work in this phase:
+
+- SSH host-key trust and persistence
+- Keychain-backed password storage
+- Keychain-backed SSH private key storage, clipboard import, and Files-based import
+- native iOS port-forward lifecycle using the russh transport instead of shell placeholder commands
+- `MobileWorkspaceSnapshotV1` restore state for remote path and iPad chrome state
+- iPad workspace chrome with Files, Outline, Git, Terminal, Search, Tasks, Problems, File Finder, Command Palette, and Agent entry points
+- visible port-forward status and retry affordances inside the iPad workspace shell
+
 Persistence notes:
 
 - Recent connections are stored in SQLite at `paths::data_dir()/zed_ios_connections.sqlite`
-- This is not the Keychain-based design originally sketched in the draft plan
-- Password prompting exists, but long-lived credential storage should still be treated as follow-up work unless explicitly finished and validated
+- Passwords and SSH private keys are stored in the platform credential store and referenced by connection metadata in SQLite
+- Session restore state stores a versioned `workspace_state_json` snapshot for the active remote workspace
 
 These filenames intentionally stay iOS-specific for now. They should not be renamed to `zed_mobile_*` until there is an actual shared mobile storage layer and an explicit migration plan.
 
@@ -125,15 +136,15 @@ The current flow is:
 4. Connect to a remote machine.
 5. Download or reuse the matching `zed-remote-server` binary as needed.
 6. Open the remote path as a project.
-7. Replace the root view with the shared workspace UI, keeping only a thin iOS status header with connection state and a Disconnect button while attaching panels such as Project, Git, and Agents when available.
+7. Replace the root view with the shared workspace UI, keeping an iPad-specific workspace shell with connection state, tool buttons, and shared workspace panels such as Project, Outline, Git, Terminal, and Agent when available.
 
 ## Remaining Work
 
 ### Phase 4: feature adaptation and product polish
 
-The remaining implementation work is mostly about fit-and-finish rather than greenfield architecture:
+The remaining implementation work is now mostly fit-and-finish rather than missing core IDE surface:
 
-- audit desktop-first UI for iPad usability, especially around panels, menus, focus behavior, and safe areas
+- audit the remaining desktop-first UI for iPad usability, especially around modals, menus, focus behavior, and safe areas
 - continue hiding or gating local-only actions and unsupported platform affordances
 - validate the full remote editing workflow on real devices and simulator builds
 - polish touch, keyboard, reconnection, and error states
@@ -141,13 +152,19 @@ The remaining implementation work is mostly about fit-and-finish rather than gre
 
 ### Phase 5: build, release, and operationalization
 
-The release path still needs dedicated work:
+The build and distribution path is now scripted, with the remaining work concentrated in environment-specific signing and release execution:
 
-- add a reproducible iOS build and packaging workflow outside of the Xcode prebuild step
-- set up code signing and provisioning
-- add CI or documented release steps for iOS artifacts
-- prepare App Store Connect and TestFlight distribution
-- write end-user and contributor documentation for building and testing the app
+- provide Apple signing credentials, provisioning, and the final App Store Connect team identifiers
+- run the scripted archive/export/upload flow against a real signing setup
+- validate install/run behavior on physical iPad hardware
+- optionally add CI once Apple credentials and runner strategy are settled
+
+Current scripts:
+
+- `script/build-ios-app simulator` for simulator validation
+- `script/build-ios-app device` for generic device compilation without signing
+- `script/build-ios-app archive --allow-provisioning-updates ...` for signed release archives
+- `script/upload-ios-testflight --archive-path ... --api-key ... --api-issuer ...` for export and TestFlight upload
 
 ## Build Prerequisites
 
@@ -156,15 +173,25 @@ Before running `cargo check -p zed_ios --target aarch64-apple-ios-sim` or buildi
 - make sure `xcode-select` points at a full Xcode installation
 - make sure the Apple Metal compiler is available to `xcrun`
 - use `script/setup-ios-toolchain` to validate the setup
+- use `script/build-ios-app simulator` or `script/build-ios-app device` for repeatable Xcode-side validation
+- make sure the Rust iOS targets are installed:
+  `rustup target add aarch64-apple-ios-sim aarch64-apple-ios`
 - if the Metal compiler is missing on macOS 26 / Xcode 26, run `script/setup-ios-toolchain --install-metal-toolchain`
+
+For release packaging and TestFlight:
+
+1. Create a signed archive:
+   `script/build-ios-app archive --allow-provisioning-updates`
+2. Export and upload to TestFlight:
+   `script/upload-ios-testflight --api-key <key-id> --api-issuer <issuer-id>`
 
 The current simulator/device build failure that mentions a missing Metal toolchain is an environment issue, not a signal that the in-tree iOS port should be replaced.
 
 ## Known Gaps and Risks
 
 - A full local `cargo check -p zed_ios` may still depend on Apple tooling being installed correctly, including the Metal toolchain.
-- The iOS renderer still contains at least one `unimplemented!()` fallback in `metal_atlas.rs`, so renderer edge cases need continued attention.
-- The app is intentionally remote-only today. Local workspace or document-picker support is out of scope for the current design.
+- The renderer fallback in `metal_atlas.rs` now degrades safely instead of panicking, but renderer edge cases still need continued attention.
+- The app is intentionally remote-only today. Local workspace selection remains out of scope for the current design.
 - The historical plan assumed several files and APIs that no longer match the implementation; this document supersedes that earlier draft.
 - Android is still a future platform from this repo's perspective. Do not rename internal iOS crates to `zed_mobile` until shared cross-mobile code actually exists.
 

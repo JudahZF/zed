@@ -47,7 +47,7 @@ mod cocoa_compat {
     }
 }
 
-use cocoa_compat::{AutoresizingMask, NSSize, NSUInteger, NO, YES};
+use cocoa_compat::{AutoresizingMask, NO, NSSize, NSUInteger, YES};
 
 use core_foundation::base::TCFType;
 
@@ -131,7 +131,7 @@ pub(crate) struct MetalRenderer {
     layer: metal::MetalLayer,
     presents_with_transaction: bool,
     command_queue: CommandQueue,
-    path_pipeline_state: metal::RenderPipelineState,
+    path_pipeline_state: Option<metal::RenderPipelineState>,
     shadows_pipeline_state: metal::RenderPipelineState,
     quads_pipeline_state: metal::RenderPipelineState,
     underlines_pipeline_state: metal::RenderPipelineState,
@@ -203,7 +203,7 @@ impl MetalRenderer {
             .find(|count| device.supports_texture_sample_count(*count))
             .unwrap_or(1);
 
-        let path_pipeline_state = build_pipeline_state(
+        let path_pipeline_state = try_build_pipeline_state(
             &device,
             &library,
             "paths",
@@ -212,6 +212,11 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
             sample_count,
         );
+        if path_pipeline_state.is_none() {
+            log::warn!(
+                "iOS Metal path rendering is unavailable; skipping path batches until the renderer is fully wired"
+            );
+        }
         let shadows_pipeline_state = build_pipeline_state(
             &device,
             &library,
@@ -440,58 +445,57 @@ impl MetalRenderer {
 
         for batch in scene.batches() {
             let ok = match batch {
-                PrimitiveBatch::Shadows(shadows) => self.draw_shadows(
-                    shadows,
+                PrimitiveBatch::Shadows(range) => self.draw_shadows(
+                    &scene.shadows[range],
                     instance_buffer,
                     &mut instance_offset,
                     viewport_size,
                     command_encoder,
                 ),
-                PrimitiveBatch::Quads(quads) => self.draw_quads(
-                    quads,
+                PrimitiveBatch::Quads(range) => self.draw_quads(
+                    &scene.quads[range],
                     instance_buffer,
                     &mut instance_offset,
                     viewport_size,
                     command_encoder,
                 ),
-                PrimitiveBatch::Paths(paths) => self.draw_paths(
-                    paths,
+                PrimitiveBatch::Paths(range) => self.draw_paths(
+                    &scene.paths[range],
                     instance_buffer,
                     &mut instance_offset,
                     viewport_size,
                     command_encoder,
                 ),
-                PrimitiveBatch::Underlines(underlines) => self.draw_underlines(
-                    underlines,
+                PrimitiveBatch::Underlines(range) => self.draw_underlines(
+                    &scene.underlines[range],
                     instance_buffer,
                     &mut instance_offset,
                     viewport_size,
                     command_encoder,
                 ),
-                PrimitiveBatch::MonochromeSprites {
-                    texture_id,
-                    sprites,
-                } => self.draw_monochrome_sprites(
-                    texture_id,
-                    sprites,
-                    instance_buffer,
-                    &mut instance_offset,
-                    viewport_size,
-                    command_encoder,
-                ),
-                PrimitiveBatch::PolychromeSprites {
-                    texture_id,
-                    sprites,
-                } => self.draw_polychrome_sprites(
-                    texture_id,
-                    sprites,
-                    instance_buffer,
-                    &mut instance_offset,
-                    viewport_size,
-                    command_encoder,
-                ),
-                PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(
-                    surfaces,
+                PrimitiveBatch::MonochromeSprites { texture_id, range } => self
+                    .draw_monochrome_sprites(
+                        texture_id,
+                        &scene.monochrome_sprites[range],
+                        instance_buffer,
+                        &mut instance_offset,
+                        viewport_size,
+                        command_encoder,
+                    ),
+                PrimitiveBatch::SubpixelSprites { .. } => {
+                    unreachable!("iOS does not support subpixel sprite rendering")
+                }
+                PrimitiveBatch::PolychromeSprites { texture_id, range } => self
+                    .draw_polychrome_sprites(
+                        texture_id,
+                        &scene.polychrome_sprites[range],
+                        instance_buffer,
+                        &mut instance_offset,
+                        viewport_size,
+                        command_encoder,
+                    ),
+                PrimitiveBatch::Surfaces(range) => self.draw_surfaces(
+                    &scene.surfaces[range],
                     instance_buffer,
                     &mut instance_offset,
                     viewport_size,
@@ -657,7 +661,11 @@ impl MetalRenderer {
             return true;
         }
 
-        command_encoder.set_render_pipeline_state(&self.path_pipeline_state);
+        let Some(path_pipeline_state) = &self.path_pipeline_state else {
+            return true;
+        };
+
+        command_encoder.set_render_pipeline_state(path_pipeline_state);
 
         unsafe {
             let base_addr = instance_buffer.metal_buffer.contents();
@@ -1026,6 +1034,58 @@ fn build_pipeline_state(
     device
         .new_render_pipeline_state(&descriptor)
         .expect("could not create render pipeline state")
+}
+
+fn try_build_pipeline_state(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: metal::MTLPixelFormat,
+    sample_count: u64,
+) -> Option<metal::RenderPipelineState> {
+    let vertex_fn = match library.get_function(vertex_fn_name, None) {
+        Ok(function) => function,
+        Err(error) => {
+            log::warn!(
+                "skipping Metal pipeline '{label}': missing vertex function '{vertex_fn_name}': {error}"
+            );
+            return None;
+        }
+    };
+    let fragment_fn = match library.get_function(fragment_fn_name, None) {
+        Ok(function) => function,
+        Err(error) => {
+            log::warn!(
+                "skipping Metal pipeline '{label}': missing fragment function '{fragment_fn_name}': {error}"
+            );
+            return None;
+        }
+    };
+
+    let descriptor = metal::RenderPipelineDescriptor::new();
+    descriptor.set_label(label);
+    descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
+    descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    descriptor.set_sample_count(sample_count);
+    let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+    color_attachment.set_pixel_format(pixel_format);
+    color_attachment.set_blending_enabled(true);
+    color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::SourceAlpha);
+    color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
+    color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
+    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+
+    match device.new_render_pipeline_state(&descriptor) {
+        Ok(state) => Some(state),
+        Err(error) => {
+            log::warn!("skipping Metal pipeline '{label}': {error}");
+            None
+        }
+    }
 }
 
 // Align to multiples of 256 make Metal happy.

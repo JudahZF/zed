@@ -11,7 +11,7 @@ use sqlez::{bindable::Column, connection::Connection, statement::Statement};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
     #[default]
@@ -50,6 +50,8 @@ pub struct ConnectionProfileInput {
     pub port_forwards: Vec<SshPortForwardOption>,
     pub auth_mode: AuthMode,
     pub upload_binary_over_ssh: bool,
+    pub private_key_name: Option<String>,
+    pub private_key_fingerprint: Option<String>,
     pub last_successful_server_version: Option<String>,
     pub last_opened_worktree: Option<String>,
 }
@@ -67,6 +69,8 @@ pub struct ConnectionProfile {
     pub port_forwards: Vec<SshPortForwardOption>,
     pub auth_mode: AuthMode,
     pub upload_binary_over_ssh: bool,
+    pub private_key_name: Option<String>,
+    pub private_key_fingerprint: Option<String>,
     pub last_successful_server_version: Option<String>,
     pub last_opened_worktree: Option<String>,
     pub last_session_timestamp: Option<i64>,
@@ -101,6 +105,8 @@ impl Column for ConnectionProfile {
         let (port_forwards_json, next) = Option::<String>::column(statement, next)?;
         let (upload_binary_over_ssh, next) = i64::column(statement, next)?;
         let (auth_mode, next) = Option::<String>::column(statement, next)?;
+        let (private_key_name, next) = Option::<String>::column(statement, next)?;
+        let (private_key_fingerprint, next) = Option::<String>::column(statement, next)?;
         let (last_successful_server_version, next) = Option::<String>::column(statement, next)?;
         let (last_opened_worktree, next) = Option::<String>::column(statement, next)?;
         let (last_session_timestamp, next) = Option::<i64>::column(statement, next)?;
@@ -124,6 +130,8 @@ impl Column for ConnectionProfile {
                     .map(AuthMode::from_db_value)
                     .unwrap_or_default(),
                 upload_binary_over_ssh: upload_binary_over_ssh != 0,
+                private_key_name,
+                private_key_fingerprint,
                 last_successful_server_version,
                 last_opened_worktree,
                 last_session_timestamp,
@@ -144,6 +152,43 @@ pub struct SessionRestoreState {
     pub last_opened_worktree: Option<String>,
     pub workspace_state_json: Option<String>,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileWorkspaceSnapshotV1 {
+    pub version: u8,
+    pub remote_path: Option<String>,
+    pub last_opened_worktree: Option<String>,
+    pub active_tool: Option<String>,
+    pub left_sidebar_visible: bool,
+    pub terminal_visible: bool,
+    pub git_panel_visible: bool,
+    pub agent_visible: bool,
+}
+
+impl MobileWorkspaceSnapshotV1 {
+    pub const VERSION: u8 = 1;
+
+    pub fn new(remote_path: Option<String>, last_opened_worktree: Option<String>) -> Self {
+        Self {
+            version: Self::VERSION,
+            remote_path,
+            last_opened_worktree,
+            active_tool: None,
+            left_sidebar_visible: true,
+            terminal_visible: false,
+            git_panel_visible: false,
+            agent_visible: false,
+        }
+    }
+
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string(self).context("Failed to serialize mobile workspace snapshot")
+    }
+
+    pub fn from_json(raw: &str) -> Result<Self> {
+        serde_json::from_str(raw).context("Failed to deserialize mobile workspace snapshot")
+    }
 }
 
 impl Column for SessionRestoreState {
@@ -226,6 +271,8 @@ impl ConnectionDb {
                 port_forwards_json TEXT,
                 auth_mode TEXT NOT NULL DEFAULT 'prompt',
                 upload_binary_over_ssh INTEGER NOT NULL DEFAULT 0,
+                private_key_name TEXT,
+                private_key_fingerprint TEXT,
                 last_successful_server_version TEXT,
                 last_opened_worktree TEXT,
                 last_session_timestamp INTEGER,
@@ -252,6 +299,13 @@ impl ConnectionDb {
             "saved_connections",
             "upload_binary_over_ssh",
             "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(&conn, "saved_connections", "private_key_name", "TEXT")?;
+        ensure_column(
+            &conn,
+            "saved_connections",
+            "private_key_fingerprint",
+            "TEXT",
         )?;
         ensure_column(
             &conn,
@@ -313,10 +367,15 @@ impl ConnectionDb {
                     Option<String>,
                     Option<String>,
                     String,
+                ),
+                (
                     bool,
                     Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
                 ),
-                (Option<String>, i64, i64),
+                (i64, i64),
             )>(
                 "INSERT INTO saved_connections (
                     hostname,
@@ -328,12 +387,14 @@ impl ConnectionDb {
                     port_forwards_json,
                     auth_mode,
                     upload_binary_over_ssh,
+                    private_key_name,
+                    private_key_fingerprint,
                     last_successful_server_version,
                     last_opened_worktree,
                     created_at,
                     last_used_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(hostname, username, port) DO UPDATE SET
                     nickname = excluded.nickname,
                     path = excluded.path,
@@ -341,6 +402,8 @@ impl ConnectionDb {
                     port_forwards_json = excluded.port_forwards_json,
                     auth_mode = excluded.auth_mode,
                     upload_binary_over_ssh = excluded.upload_binary_over_ssh,
+                    private_key_name = excluded.private_key_name,
+                    private_key_fingerprint = excluded.private_key_fingerprint,
                     last_successful_server_version = COALESCE(excluded.last_successful_server_version, saved_connections.last_successful_server_version),
                     last_opened_worktree = COALESCE(excluded.last_opened_worktree, saved_connections.last_opened_worktree),
                     last_used_at = excluded.last_used_at"
@@ -354,10 +417,15 @@ impl ConnectionDb {
                     serialize_json_vec(&input.ssh_args)?,
                     serialize_json_vec(&input.port_forwards)?,
                     input.auth_mode.as_db_value().to_string(),
-                    input.upload_binary_over_ssh,
-                    input.last_successful_server_version.clone(),
                 ),
-                (input.last_opened_worktree.clone(), now, now),
+                (
+                    input.upload_binary_over_ssh,
+                    input.private_key_name.clone(),
+                    input.private_key_fingerprint.clone(),
+                    input.last_successful_server_version.clone(),
+                    input.last_opened_worktree.clone(),
+                ),
+                (now, now),
             ))
             .context("Failed to upsert connection profile")?;
         }
@@ -381,6 +449,8 @@ impl ConnectionDb {
                 port_forwards_json,
                 upload_binary_over_ssh,
                 auth_mode,
+                private_key_name,
+                private_key_fingerprint,
                 last_successful_server_version,
                 last_opened_worktree,
                 last_session_timestamp,
@@ -415,6 +485,8 @@ impl ConnectionDb {
                 port_forwards_json,
                 upload_binary_over_ssh,
                 auth_mode,
+                private_key_name,
+                private_key_fingerprint,
                 last_successful_server_version,
                 last_opened_worktree,
                 last_session_timestamp,
@@ -446,6 +518,8 @@ impl ConnectionDb {
                 port_forwards_json,
                 upload_binary_over_ssh,
                 auth_mode,
+                private_key_name,
+                private_key_fingerprint,
                 last_successful_server_version,
                 last_opened_worktree,
                 last_session_timestamp,
@@ -598,6 +672,14 @@ pub fn credential_url(hostname: &str, username: &str, port: u16) -> String {
     format!("ssh://{}@{}:{}", username, hostname, port)
 }
 
+pub fn private_key_credential_url(hostname: &str, username: &str, port: u16) -> String {
+    format!("ssh-key://{}@{}:{}/private-key", username, hostname, port)
+}
+
+pub fn private_key_passphrase_url(hostname: &str, username: &str, port: u16) -> String {
+    format!("ssh-key://{}@{}:{}/passphrase", username, hostname, port)
+}
+
 pub fn current_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -663,6 +745,8 @@ mod tests {
                 }],
                 auth_mode: AuthMode::KeychainSecret,
                 upload_binary_over_ssh: true,
+                private_key_name: None,
+                private_key_fingerprint: None,
                 last_successful_server_version: Some("0.1.0".into()),
                 last_opened_worktree: Some("~/code".into()),
             })
@@ -691,7 +775,11 @@ mod tests {
             connection_profile_id: profile.id,
             remote_path: Some("~/zed".into()),
             last_opened_worktree: Some("~/zed".into()),
-            workspace_state_json: Some("{\"pane\":\"left\"}".into()),
+            workspace_state_json: Some(
+                MobileWorkspaceSnapshotV1::new(Some("~/zed".into()), Some("~/zed".into()))
+                    .to_json()
+                    .unwrap(),
+            ),
             updated_at: current_timestamp(),
         })
         .unwrap();
@@ -702,5 +790,14 @@ mod tests {
 
         let restored_profile = db.last_session_connection_profile().unwrap().unwrap();
         assert_eq!(restored_profile.hostname, "example.com");
+    }
+
+    #[test]
+    fn mobile_workspace_snapshot_round_trips() {
+        let snapshot = MobileWorkspaceSnapshotV1::new(Some("~/zed".into()), Some("~/zed".into()));
+        let raw = snapshot.to_json().unwrap();
+        let decoded = MobileWorkspaceSnapshotV1::from_json(&raw).unwrap();
+        assert_eq!(decoded.version, MobileWorkspaceSnapshotV1::VERSION);
+        assert_eq!(decoded.remote_path.as_deref(), Some("~/zed"));
     }
 }

@@ -2159,6 +2159,10 @@ impl Workspace {
         &self.status_bar
     }
 
+    pub fn modal_layer(&self) -> Entity<ModalLayer> {
+        self.modal_layer.clone()
+    }
+
     pub fn set_workspace_sidebar_open(&self, open: bool, cx: &mut App) {
         self.status_bar.update(cx, |status_bar, cx| {
             status_bar.set_workspace_sidebar_open(open, cx);

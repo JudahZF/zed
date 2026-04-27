@@ -5,7 +5,12 @@
 
 use crate::{
     HostKeyChallenge, HostKeyDecision, RemoteArch, RemoteClientDelegate, RemoteOs, RemotePlatform,
-    remote_client::{CommandTemplate, RemoteConnection, RemoteConnectionOptions},
+    remote_client::{
+        CommandTemplate, Interactive, RemoteConnection, RemoteConnectionOptions, SshKeyAuth,
+    },
+    transport::russh_helper::{
+        RusshHelperFrame, RusshHelperRequest, RusshWindowSize, build_russh_helper_command_template,
+    },
     transport::ssh::SshConnectionOptions,
     transport::{parse_platform, parse_shell},
 };
@@ -23,16 +28,26 @@ use paths::remote_server_dir_relative;
 use prost::Message as ProstMessage;
 use release_channel::{AppVersion, ReleaseChannel};
 use rpc::proto::Envelope;
-use russh::keys::{PublicKeyBase64, known_hosts::learn_known_hosts_path};
-use russh::{ChannelMsg, client};
+use russh::keys::{PrivateKeyWithHashAlg, PublicKeyBase64, known_hosts::learn_known_hosts_path};
+use russh::{ChannelMsg, Pty, client};
 use semver::Version;
 use sha2::{Digest, Sha256};
 use std::{
+    mem::size_of,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
-use tokio::io::AsyncWriteExt as TokioAsyncWriteExt;
+use tokio::{
+    io::{
+        AsyncRead as TokioAsyncRead, AsyncReadExt as TokioAsyncReadExt,
+        AsyncWrite as TokioAsyncWrite, AsyncWriteExt as TokioAsyncWriteExt,
+    },
+    net::{TcpListener, UnixListener, UnixStream},
+    sync::oneshot,
+    task::JoinHandle,
+};
 use util::{
     paths::{PathStyle, RemotePathBuf},
     rel_path::RelPath,
@@ -50,6 +65,12 @@ pub struct RusshRemoteConnection {
     ssh_shell_kind: ShellKind,
     ssh_default_system_shell: String,
     killed: Arc<std::sync::atomic::AtomicBool>,
+    forwarding_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
+    helper_temp_dir: Arc<tempfile::TempDir>,
+    helper_socket_path: PathBuf,
+    helper_server_task: Arc<tokio::sync::Mutex<Option<JoinHandle<Result<()>>>>>,
+    helper_connection_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
+    helper_shutdown_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<()>>>>,
 }
 
 /// Handler for russh client events.
@@ -239,6 +260,453 @@ impl client::Handler for RusshHandler {
 }
 
 impl RusshRemoteConnection {
+    fn create_helper_temp_dir() -> Result<tempfile::TempDir> {
+        tempfile::Builder::new()
+            .prefix("zed-russh-")
+            .tempdir_in("/tmp")
+            .or_else(|_| tempfile::Builder::new().prefix("zed-russh-").tempdir())
+            .context("Failed to create Russh helper temporary directory")
+    }
+
+    fn default_helper_window_size() -> RusshWindowSize {
+        RusshWindowSize {
+            columns: 80,
+            rows: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+
+    async fn read_helper_payload<S>(stream: &mut S) -> Result<Vec<u8>>
+    where
+        S: TokioAsyncRead + Unpin,
+    {
+        let mut length_buffer = [0; size_of::<u32>()];
+        stream.read_exact(&mut length_buffer).await?;
+        let payload_length = u32::from_le_bytes(length_buffer) as usize;
+        let mut payload = vec![0; payload_length];
+        stream.read_exact(&mut payload).await?;
+        Ok(payload)
+    }
+
+    async fn write_helper_payload<S>(stream: &mut S, payload: &[u8]) -> Result<()>
+    where
+        S: TokioAsyncWrite + Unpin,
+    {
+        let payload_length =
+            u32::try_from(payload.len()).context("Russh helper payload exceeds u32")?;
+        stream.write_all(&payload_length.to_le_bytes()).await?;
+        stream.write_all(payload).await?;
+        stream.flush().await?;
+        Ok(())
+    }
+
+    async fn read_helper_request<S>(stream: &mut S) -> Result<RusshHelperRequest>
+    where
+        S: TokioAsyncRead + Unpin,
+    {
+        RusshHelperRequest::decode(&Self::read_helper_payload(stream).await?)
+    }
+
+    async fn read_helper_frame<S>(stream: &mut S) -> Result<RusshHelperFrame>
+    where
+        S: TokioAsyncRead + Unpin,
+    {
+        RusshHelperFrame::decode(&Self::read_helper_payload(stream).await?)
+    }
+
+    async fn write_helper_frame<S>(stream: &mut S, frame: &RusshHelperFrame) -> Result<()>
+    where
+        S: TokioAsyncWrite + Unpin,
+    {
+        Self::write_helper_payload(stream, &frame.encode()?).await
+    }
+
+    async fn send_helper_error<S>(stream: &mut S, error: &anyhow::Error)
+    where
+        S: TokioAsyncWrite + Unpin,
+    {
+        if let Err(write_error) =
+            Self::write_helper_frame(stream, &RusshHelperFrame::Error(error.to_string())).await
+        {
+            log::warn!("[iOS SSH] Failed to send helper error frame: {write_error:#}");
+        }
+    }
+
+    async fn abort_tasks(tasks: &Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>) {
+        let handles = {
+            let mut guard = tasks.lock().await;
+            guard.drain(..).collect::<Vec<_>>()
+        };
+
+        for task in handles {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    async fn handle_helper_connection(
+        session: Arc<tokio::sync::Mutex<Option<client::Handle<RusshHandler>>>>,
+        stream: &mut UnixStream,
+    ) -> Result<()> {
+        let request = Self::read_helper_request(stream)
+            .await
+            .context("Failed to read Russh helper request")?;
+        let mut channel = {
+            let guard = session.lock().await;
+            let session = guard
+                .as_ref()
+                .ok_or_else(|| anyhow!("SSH session not available"))?;
+            session.channel_open_session().await?
+        };
+
+        if request.interactive {
+            let window_size = request
+                .initial_window_size
+                .unwrap_or_else(Self::default_helper_window_size);
+            channel
+                .request_pty(
+                    true,
+                    "xterm-256color",
+                    window_size.columns as u32,
+                    window_size.rows as u32,
+                    window_size.pixel_width as u32,
+                    window_size.pixel_height as u32,
+                    &[(Pty::ECHO, 1)],
+                )
+                .await
+                .context("Failed to request Russh helper PTY")?;
+        }
+
+        channel
+            .exec(true, request.command.clone())
+            .await
+            .context("Failed to exec Russh helper command")?;
+        let (mut stream_reader, mut stream_writer) = tokio::io::split(stream);
+
+        loop {
+            tokio::select! {
+                helper_frame = Self::read_helper_frame(&mut stream_reader) => {
+                    match helper_frame {
+                        Ok(RusshHelperFrame::Stdin(data)) => {
+                            if !data.is_empty() {
+                                channel.data(&data[..]).await?;
+                            }
+                        }
+                        Ok(RusshHelperFrame::Resize(size)) => {
+                            channel
+                                .window_change(
+                                    size.columns as u32,
+                                    size.rows as u32,
+                                    size.pixel_width as u32,
+                                    size.pixel_height as u32,
+                                )
+                                .await?;
+                        }
+                        Ok(RusshHelperFrame::Eof) => {
+                            channel.eof().await?;
+                        }
+                        Ok(frame) => {
+                            anyhow::bail!("Unexpected frame from Russh helper child: {frame:?}");
+                        }
+                        Err(error)
+                            if error
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|error| error.kind() == std::io::ErrorKind::UnexpectedEof) =>
+                        {
+                            break;
+                        }
+                        Err(error) => {
+                            return Err(error).context("Failed while reading Russh helper input");
+                        }
+                    }
+                }
+                channel_message = channel.wait() => {
+                    match channel_message {
+                        Some(ChannelMsg::Data { data }) => {
+                            Self::write_helper_frame(&mut stream_writer, &RusshHelperFrame::Stdout(data.to_vec())).await?;
+                        }
+                        Some(ChannelMsg::ExtendedData { data, ext }) => {
+                            if ext == 1 {
+                                Self::write_helper_frame(&mut stream_writer, &RusshHelperFrame::Stderr(data.to_vec())).await?;
+                            }
+                        }
+                        Some(ChannelMsg::ExitStatus { exit_status }) => {
+                            let exit_status = i32::try_from(exit_status).unwrap_or(i32::MAX);
+                            Self::write_helper_frame(&mut stream_writer, &RusshHelperFrame::ExitStatus(exit_status)).await?;
+                        }
+                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                            break;
+                        }
+                        Some(ChannelMsg::WindowAdjusted { .. }) => {}
+                        Some(other) => {
+                            log::debug!("[iOS SSH] Ignoring helper channel message: {other:?}");
+                        }
+                    }
+                }
+            }
+        }
+
+        stream_writer.shutdown().await.ok();
+        channel.close().await.ok();
+        Ok(())
+    }
+
+    async fn run_helper_server(
+        session: Arc<tokio::sync::Mutex<Option<client::Handle<RusshHandler>>>>,
+        listener: UnixListener,
+        helper_connection_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
+        mut shutdown_rx: oneshot::Receiver<()>,
+    ) -> Result<()> {
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    break;
+                }
+                accept_result = listener.accept() => {
+                    let (mut stream, _) = accept_result.context("Failed to accept Russh helper connection")?;
+                    let session = session.clone();
+                    let task = tokio::spawn(async move {
+                        if let Err(error) = Self::handle_helper_connection(session, &mut stream).await {
+                            Self::send_helper_error(&mut stream, &error).await;
+                            log::warn!("[iOS SSH] Russh helper connection failed: {error:#}");
+                        }
+                    });
+                    helper_connection_tasks.lock().await.push(task);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn build_exec_command(
+        &self,
+        input_program: Option<String>,
+        input_args: &[String],
+        input_env: &HashMap<String, String>,
+        working_dir: Option<String>,
+    ) -> Result<String> {
+        use std::fmt::Write as _;
+
+        let mut exec = String::new();
+        if let Some(working_dir) = working_dir {
+            let working_dir = RemotePathBuf::new(working_dir, self.ssh_path_style).to_string();
+
+            const TILDE_PREFIX: &str = "~/";
+            if working_dir.starts_with(TILDE_PREFIX) {
+                let working_dir = working_dir.trim_start_matches("~").trim_start_matches("/");
+                write!(
+                    exec,
+                    "cd \"$HOME/{working_dir}\" {} ",
+                    self.ssh_shell_kind.sequential_and_commands_separator()
+                )?;
+            } else {
+                write!(
+                    exec,
+                    "cd \"{working_dir}\" {} ",
+                    self.ssh_shell_kind.sequential_and_commands_separator()
+                )?;
+            }
+        };
+        write!(exec, "exec env ")?;
+
+        for (key, value) in input_env {
+            let is_valid_env_name = !key.is_empty()
+                && key
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+                && key
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_');
+
+            if !is_valid_env_name {
+                anyhow::bail!(
+                    "Invalid environment variable name {:?} in build_command: \
+                     names must match [A-Za-z_][A-Za-z0-9_]* (shell kind: {:?})",
+                    key,
+                    self.ssh_shell_kind
+                );
+            }
+
+            write!(
+                exec,
+                "{}={} ",
+                key,
+                self.ssh_shell_kind.try_quote(value).context("shell quoting")?
+            )?;
+        }
+
+        if let Some(input_program) = input_program {
+            write!(
+                exec,
+                "{}",
+                self.ssh_shell_kind
+                    .try_quote_prefix_aware(&input_program)
+                    .context("shell quoting")?
+            )?;
+            for arg in input_args {
+                let arg = self
+                    .ssh_shell_kind
+                    .try_quote(arg)
+                    .context("shell quoting")?;
+                write!(exec, " {}", arg)?;
+            }
+        } else {
+            write!(exec, "{} -l", self.ssh_shell)?;
+        }
+
+        Ok(exec)
+    }
+
+    async fn authenticate_with_key(
+        session: &mut client::Handle<RusshHandler>,
+        username: &str,
+        key_auth: &SshKeyAuth,
+    ) -> Result<bool> {
+        let private_key =
+            russh::keys::decode_secret_key(&key_auth.private_key, key_auth.passphrase.as_deref())
+                .with_context(|| {
+                let label = key_auth
+                    .display_name
+                    .as_deref()
+                    .unwrap_or("SSH private key");
+                format!("Failed to decode {label}")
+            })?;
+
+        let private_key = PrivateKeyWithHashAlg::new(
+            Arc::new(private_key),
+            session.best_supported_rsa_hash().await?.flatten(),
+        );
+
+        Ok(session
+            .authenticate_publickey(username.to_string(), private_key)
+            .await
+            .context("Public-key authentication failed")?
+            .success())
+    }
+
+    fn local_bind_addr(local_host: &str, local_port: u16) -> SocketAddr {
+        let ip_address = local_host
+            .parse::<IpAddr>()
+            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        SocketAddr::new(ip_address, local_port)
+    }
+
+    async fn abort_forwarding_tasks(
+        forwarding_tasks: &Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
+    ) {
+        let tasks = {
+            let mut guard = forwarding_tasks.lock().await;
+            guard.drain(..).collect::<Vec<_>>()
+        };
+
+        for task in tasks {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    async fn bridge_forwarded_stream(
+        session: Arc<tokio::sync::Mutex<Option<client::Handle<RusshHandler>>>>,
+        mut stream: tokio::net::TcpStream,
+        originator_addr: SocketAddr,
+        remote_host: String,
+        remote_port: u16,
+    ) -> Result<()> {
+        let mut channel = {
+            let guard = session.lock().await;
+            let session = guard
+                .as_ref()
+                .ok_or_else(|| anyhow!("SSH session not available"))?;
+            session
+                .channel_open_direct_tcpip(
+                    remote_host.clone(),
+                    remote_port.into(),
+                    originator_addr.ip().to_string(),
+                    originator_addr.port().into(),
+                )
+                .await?
+        };
+
+        let mut stream_closed = false;
+        let mut buffer = vec![0; 64 * 1024];
+
+        loop {
+            tokio::select! {
+                read_result = stream.read(&mut buffer), if !stream_closed => {
+                    match read_result {
+                        Ok(0) => {
+                            stream_closed = true;
+                            channel.eof().await?;
+                        }
+                        Ok(bytes_read) => channel.data(&buffer[..bytes_read]).await?,
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                channel_message = channel.wait() => {
+                    match channel_message {
+                        Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                            stream.write_all(&data).await?;
+                        }
+                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                            if !stream_closed {
+                                stream.shutdown().await.ok();
+                            }
+                            break;
+                        }
+                        Some(ChannelMsg::WindowAdjusted { .. }) => {}
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn run_port_forward_listener(
+        session: Arc<tokio::sync::Mutex<Option<client::Handle<RusshHandler>>>>,
+        forwarding_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
+        listener: TcpListener,
+        local_host: String,
+        local_port: u16,
+        remote_host: String,
+        remote_port: u16,
+    ) -> Result<()> {
+        loop {
+            let (stream, originator_addr) = listener.accept().await.with_context(|| {
+                format!(
+                    "Failed to accept forwarded connection on {}:{}",
+                    local_host, local_port
+                )
+            })?;
+
+            let session = session.clone();
+            let remote_host = remote_host.clone();
+            let bridge_task = tokio::spawn(async move {
+                if let Err(error) = Self::bridge_forwarded_stream(
+                    session,
+                    stream,
+                    originator_addr,
+                    remote_host.clone(),
+                    remote_port,
+                )
+                .await
+                {
+                    log::warn!(
+                        "[iOS SSH] Port forward bridge to {}:{} failed: {error:#}",
+                        remote_host,
+                        remote_port
+                    );
+                }
+            });
+
+            forwarding_tasks.lock().await.push(bridge_task);
+        }
+    }
+
     pub async fn new(
         connection_options: SshConnectionOptions,
         delegate: Arc<dyn RemoteClientDelegate>,
@@ -261,11 +729,13 @@ impl RusshRemoteConnection {
 
         // First, try to connect and authenticate without a password (on Tokio)
         let initial_password = connection_options.password.clone();
+        let ssh_key_auth = delegate.ssh_key_auth();
         let addr_for_connect = addr.clone();
         let username_for_connect = username.clone();
         let host_for_handler = host.clone();
         let port_for_handler = port;
         let delegate_for_connect = delegate.clone();
+        let ssh_key_auth_for_connect = ssh_key_auth.clone();
 
         let (mut session, mut authenticated) = Tokio::spawn_result(cx, async move {
             let config = client::Config {
@@ -288,16 +758,24 @@ impl RusshRemoteConnection {
                     .context("Password authentication failed")?
                     .success()
             } else {
-                // Try none authentication
-                session
+                let authenticated = session
                     .authenticate_none(&username_for_connect)
                     .await
                     .map(|r| r.success())
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+
+                if authenticated {
+                    true
+                } else if let Some(key_auth) = ssh_key_auth_for_connect.as_ref() {
+                    Self::authenticate_with_key(&mut session, &username_for_connect, key_auth)
+                        .await?
+                } else {
+                    false
+                }
             };
 
             Ok::<_, anyhow::Error>((session, authenticated))
-        })?
+        })
         .await?;
 
         // If not authenticated, request password from user
@@ -322,7 +800,7 @@ impl RusshRemoteConnection {
                     .context("Password authentication failed")?
                     .success();
                 Ok::<_, anyhow::Error>((session, result))
-            })?
+            })
             .await?;
 
             session = new_session;
@@ -368,11 +846,17 @@ impl RusshRemoteConnection {
             ssh_shell_kind,
             ssh_default_system_shell,
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            forwarding_tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            helper_temp_dir: Arc::new(Self::create_helper_temp_dir()?),
+            helper_socket_path: PathBuf::new(),
+            helper_server_task: Arc::new(tokio::sync::Mutex::new(None)),
+            helper_connection_tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            helper_shutdown_tx: Arc::new(tokio::sync::Mutex::new(None)),
         };
 
         // Ensure the remote server binary is available
         let (release_channel, version) =
-            cx.update(|cx| (ReleaseChannel::global(cx), AppVersion::global(cx)))?;
+            cx.update(|cx| (ReleaseChannel::global(cx), AppVersion::global(cx)));
         log::info!(
             "Ensuring server binary for release_channel={:?}, version={}",
             release_channel,
@@ -386,6 +870,26 @@ impl RusshRemoteConnection {
             remote_binary_path.display(this.path_style())
         );
         this.remote_binary_path = Some(remote_binary_path);
+
+        let helper_socket_path = this.helper_temp_dir.path().join("helper.sock");
+        let helper_listener = UnixListener::bind(&helper_socket_path)
+            .with_context(|| format!("Failed to bind Russh helper socket at {}", helper_socket_path.display()))?;
+        let (helper_shutdown_tx, helper_shutdown_rx) = oneshot::channel();
+        let helper_connection_tasks = this.helper_connection_tasks.clone();
+        let helper_session = this.session.clone();
+        let tokio_handle = cx.update(|cx| Tokio::handle(cx));
+        let helper_server_task = tokio_handle.spawn(async move {
+            Self::run_helper_server(
+                helper_session,
+                helper_listener,
+                helper_connection_tasks,
+                helper_shutdown_rx,
+            )
+            .await
+        });
+        this.helper_socket_path = helper_socket_path;
+        *this.helper_server_task.lock().await = Some(helper_server_task);
+        *this.helper_shutdown_tx.lock().await = Some(helper_shutdown_tx);
 
         Ok(this)
     }
@@ -515,7 +1019,7 @@ impl RusshRemoteConnection {
             };
             // Now run the command without holding the session lock
             Self::run_command_on_channel(channel, &command).await
-        })?
+        })
         .await
     }
 
@@ -607,7 +1111,7 @@ impl RusshRemoteConnection {
 
         #[cfg(debug_assertions)]
         if let Some(remote_server_path) =
-            super::build_remote_server_from_source(&self.ssh_platform, delegate.as_ref(), cx)
+            super::build_remote_server_from_source(&self.ssh_platform, delegate.as_ref(), false, cx)
                 .await?
         {
             let tmp_path = paths::remote_server_dir_relative().join(
@@ -653,11 +1157,9 @@ impl RusshRemoteConnection {
         }
 
         let wanted_version = cx.update(|cx| match release_channel {
-            ReleaseChannel::Nightly | ReleaseChannel::Dev => {
-                Ok::<Option<Version>, anyhow::Error>(None)
-            }
-            _ => Ok(Some(AppVersion::global(cx))),
-        })??;
+            ReleaseChannel::Nightly | ReleaseChannel::Dev => None,
+            _ => Some(AppVersion::global(cx)),
+        });
 
         let tmp_path_gz = remote_server_dir_relative().join(
             RelPath::unix(&format!(
@@ -927,6 +1429,19 @@ impl RusshRemoteConnection {
 impl RemoteConnection for RusshRemoteConnection {
     async fn kill(&self) -> Result<()> {
         self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(shutdown_tx) = self.helper_shutdown_tx.lock().await.take() {
+            let _ = shutdown_tx.send(());
+        }
+        if let Some(helper_server_task) = self.helper_server_task.lock().await.take() {
+            match helper_server_task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!("[iOS SSH] Russh helper server failed during shutdown: {error:#}"),
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => log::warn!("[iOS SSH] Russh helper server join failed during shutdown: {error:#}"),
+            }
+        }
+        Self::abort_tasks(&self.helper_connection_tasks).await;
+        Self::abort_forwarding_tasks(&self.forwarding_tasks).await;
         if let Some(session) = self.session.lock().await.take() {
             session
                 .disconnect(russh::Disconnect::ByApplication, "", "en")
@@ -959,81 +1474,17 @@ impl RemoteConnection for RusshRemoteConnection {
         input_env: &HashMap<String, String>,
         working_dir: Option<String>,
         _port_forward: Option<(u16, String, u16)>,
+        interactive: Interactive,
     ) -> Result<CommandTemplate> {
-        use std::fmt::Write as _;
-
-        let mut exec = String::new();
-        if let Some(working_dir) = working_dir {
-            let working_dir = RemotePathBuf::new(working_dir, self.ssh_path_style).to_string();
-
-            const TILDE_PREFIX: &str = "~/";
-            if working_dir.starts_with(TILDE_PREFIX) {
-                let working_dir = working_dir.trim_start_matches("~").trim_start_matches("/");
-                write!(
-                    exec,
-                    "cd \"$HOME/{working_dir}\" {} ",
-                    self.ssh_shell_kind.sequential_and_commands_separator()
-                )?;
-            } else {
-                write!(
-                    exec,
-                    "cd \"{working_dir}\" {} ",
-                    self.ssh_shell_kind.sequential_and_commands_separator()
-                )?;
-            }
-        };
-        write!(exec, "exec env ")?;
-
-        for (k, v) in input_env.iter() {
-            // Validate env var name to prevent command injection.
-            // Valid identifiers: start with letter or underscore, followed by letters, digits, or underscores.
-            let is_valid_env_name = !k.is_empty()
-                && k.chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-
-            if !is_valid_env_name {
-                anyhow::bail!(
-                    "Invalid environment variable name {:?} in build_command: \
-                     names must match [A-Za-z_][A-Za-z0-9_]* (shell kind: {:?})",
-                    k,
-                    self.ssh_shell_kind
-                );
-            }
-
-            write!(
-                exec,
-                "{}={} ",
-                k,
-                self.ssh_shell_kind.try_quote(v).context("shell quoting")?
-            )?;
-        }
-
-        if let Some(input_program) = input_program {
-            write!(
-                exec,
-                "{}",
-                self.ssh_shell_kind
-                    .try_quote_prefix_aware(&input_program)
-                    .context("shell quoting")?
-            )?;
-            for arg in input_args {
-                let arg = self
-                    .ssh_shell_kind
-                    .try_quote(arg)
-                    .context("shell quoting")?;
-                write!(exec, " {}", &arg)?;
-            }
-        } else {
-            write!(exec, "{} -l", self.ssh_shell)?;
-        };
-
-        Ok(CommandTemplate {
-            program: "russh-internal".into(),
-            args: vec![exec],
-            env: Default::default(),
-        })
+        let executable_path =
+            std::env::current_exe().context("Failed to determine current executable for Russh helper")?;
+        let command = self.build_exec_command(input_program, input_args, input_env, working_dir)?;
+        Ok(build_russh_helper_command_template(
+            &executable_path,
+            &self.helper_socket_path,
+            command,
+            interactive,
+        ))
     }
 
     fn build_forward_ports_command(
@@ -1044,6 +1495,72 @@ impl RemoteConnection for RusshRemoteConnection {
             program: "russh-internal-forward".into(),
             args: vec![],
             env: Default::default(),
+        })
+    }
+
+    fn start_port_forwarding(
+        &self,
+        forwards: Vec<(String, u16, String, u16)>,
+        cx: &App,
+    ) -> Task<Result<()>> {
+        let session = self.session.clone();
+        let forwarding_tasks = self.forwarding_tasks.clone();
+
+        Tokio::spawn_result(cx, async move {
+            Self::abort_forwarding_tasks(&forwarding_tasks).await;
+
+            for (local_host, local_port, remote_host, remote_port) in forwards {
+                let bind_addr = Self::local_bind_addr(&local_host, local_port);
+                let listener = match TcpListener::bind(bind_addr).await {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        Self::abort_forwarding_tasks(&forwarding_tasks).await;
+                        return Err(anyhow::Error::new(error).context(format!(
+                            "Failed to bind local port {}:{}",
+                            local_host, local_port
+                        )));
+                    }
+                };
+
+                let session = session.clone();
+                let forwarding_tasks_for_listener = forwarding_tasks.clone();
+                let local_host_for_task = local_host.clone();
+                let remote_host_for_task = remote_host.clone();
+
+                let listener_task = tokio::spawn(async move {
+                    if let Err(error) = Self::run_port_forward_listener(
+                        session,
+                        forwarding_tasks_for_listener,
+                        listener,
+                        local_host_for_task.clone(),
+                        local_port,
+                        remote_host_for_task.clone(),
+                        remote_port,
+                    )
+                    .await
+                    {
+                        log::warn!(
+                            "[iOS SSH] Port forward listener {}:{} -> {}:{} stopped: {error:#}",
+                            local_host_for_task,
+                            local_port,
+                            remote_host_for_task,
+                            remote_port
+                        );
+                    }
+                });
+
+                forwarding_tasks.lock().await.push(listener_task);
+            }
+
+            Ok(())
+        })
+    }
+
+    fn stop_port_forwarding(&self, cx: &App) -> Task<Result<()>> {
+        let forwarding_tasks = self.forwarding_tasks.clone();
+        Tokio::spawn_result(cx, async move {
+            Self::abort_forwarding_tasks(&forwarding_tasks).await;
+            Ok(())
         })
     }
 
@@ -1133,6 +1650,7 @@ impl RemoteConnection for RusshRemoteConnection {
         false
     }
 }
+
 
 async fn upload_directory_recursive(
     sftp: &russh_sftp::client::SftpSession,

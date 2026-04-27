@@ -8,7 +8,7 @@ use crate::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardEntry, ClipboardItem,
     DummyKeyboardMapper, ForegroundExecutor, IosLifecycleEvent, Keymap, Menu, MenuItem,
     PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
-    PlatformTextSystem, PlatformWindow, Result, Subscription, Task, WindowAppearance,
+    PlatformTextSystem, PlatformWindow, Result, Subscription, Task, ThermalState, WindowAppearance,
     WindowParams,
 };
 use anyhow::{Context as _, anyhow};
@@ -21,17 +21,31 @@ use core_foundation::{
 };
 use core_foundation_sys::{base::OSStatus, dictionary::CFDictionaryRef, string::CFStringRef};
 use futures::channel::oneshot;
-use objc::{class, msg_send, runtime::Object, sel, sel_impl};
+use objc::{
+    class,
+    declare::ClassDecl,
+    msg_send,
+    runtime::{BOOL, Class, NO, Object, Sel, YES},
+    sel, sel_impl,
+};
 use parking_lot::Mutex;
 use std::{
+    ffi::CStr,
     ffi::c_void,
     path::{Path, PathBuf},
     ptr,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 pub struct IosPlatform(Mutex<IosPlatformState>);
+
+type PathPromptResult = Result<Option<Vec<PathBuf>>>;
+type PathPromptSender = oneshot::Sender<PathPromptResult>;
+
+static ACTIVE_PATH_PROMPT: Mutex<Option<PathPromptSender>> = Mutex::new(None);
+static ACTIVE_PATH_PROMPT_DELEGATE: Mutex<Option<usize>> = Mutex::new(None);
+static DOCUMENT_PICKER_DELEGATE_CLASS: OnceLock<&'static Class> = OnceLock::new();
 
 struct IosPlatformState {
     background_executor: BackgroundExecutor,
@@ -94,6 +108,155 @@ impl IosPlatform {
     }
 }
 
+fn ensure_document_picker_delegate_registered() {
+    DOCUMENT_PICKER_DELEGATE_CLASS
+        .get_or_init(|| unsafe { register_document_picker_delegate_class() });
+}
+
+unsafe fn register_document_picker_delegate_class() -> &'static Class {
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("GPUIDocumentPickerDelegate", superclass).unwrap();
+    unsafe {
+        decl.add_method(
+            sel!(documentPicker:didPickDocumentsAtURLs:),
+            document_picker_did_pick_documents
+                as extern "C" fn(&Object, Sel, *mut Object, *mut Object),
+        );
+        decl.add_method(
+            sel!(documentPicker:didPickDocumentAtURL:),
+            document_picker_did_pick_document
+                as extern "C" fn(&Object, Sel, *mut Object, *mut Object),
+        );
+        decl.add_method(
+            sel!(documentPickerWasCancelled:),
+            document_picker_was_cancelled as extern "C" fn(&Object, Sel, *mut Object),
+        );
+    }
+    decl.register()
+}
+
+extern "C" fn document_picker_did_pick_documents(
+    _this: &Object,
+    _sel: Sel,
+    _picker: *mut Object,
+    urls: *mut Object,
+) {
+    unsafe {
+        finish_active_path_prompt(ns_urls_to_paths(urls).map(Some));
+    }
+}
+
+extern "C" fn document_picker_did_pick_document(
+    _this: &Object,
+    _sel: Sel,
+    _picker: *mut Object,
+    url: *mut Object,
+) {
+    unsafe {
+        finish_active_path_prompt(ns_url_to_path(url).map(|path| Some(vec![path])));
+    }
+}
+
+extern "C" fn document_picker_was_cancelled(_this: &Object, _sel: Sel, _picker: *mut Object) {
+    finish_active_path_prompt(Ok(None));
+}
+
+fn finish_active_path_prompt(result: PathPromptResult) {
+    if let Some(sender) = ACTIVE_PATH_PROMPT.lock().take() {
+        sender.send(result).ok();
+    }
+    release_active_path_prompt_delegate();
+}
+
+fn release_active_path_prompt_delegate() {
+    let delegate = ACTIVE_PATH_PROMPT_DELEGATE.lock().take();
+    if let Some(delegate) = delegate {
+        unsafe {
+            let delegate = delegate as *mut Object;
+            let _: () = msg_send![delegate, release];
+        }
+    }
+}
+
+unsafe fn ns_url_to_path(url: *mut Object) -> Result<PathBuf> {
+    if url.is_null() {
+        return Err(anyhow!("Document picker returned a null URL"));
+    }
+
+    let is_file_url: BOOL = msg_send![url, isFileURL];
+    if is_file_url == NO {
+        return Err(anyhow!("Document picker returned a non-file URL"));
+    }
+
+    let path: *mut Object = msg_send![url, path];
+    if path.is_null() {
+        return Err(anyhow!("Document picker returned a URL without a path"));
+    }
+
+    let utf8: *const i8 = msg_send![path, UTF8String];
+    if utf8.is_null() {
+        return Err(anyhow!(
+            "Document picker returned a path that was not UTF-8"
+        ));
+    }
+
+    let path = unsafe { CStr::from_ptr(utf8) }.to_str()?;
+    Ok(PathBuf::from(path))
+}
+
+unsafe fn ns_urls_to_paths(urls: *mut Object) -> Result<Vec<PathBuf>> {
+    if urls.is_null() {
+        return Err(anyhow!("Document picker returned no URLs"));
+    }
+
+    let count: usize = msg_send![urls, count];
+    let mut paths = Vec::with_capacity(count);
+    for index in 0..count {
+        let url: *mut Object = msg_send![urls, objectAtIndex: index];
+        paths.push(unsafe { ns_url_to_path(url) }?);
+    }
+    Ok(paths)
+}
+
+unsafe fn active_presenting_view_controller() -> *mut Object {
+    let app: *mut Object = msg_send![class!(UIApplication), sharedApplication];
+    let mut key_window: *mut Object = msg_send![app, keyWindow];
+
+    if key_window.is_null() {
+        let windows: *mut Object = msg_send![app, windows];
+        if !windows.is_null() {
+            let count: usize = msg_send![windows, count];
+            for index in 0..count {
+                let candidate: *mut Object = msg_send![windows, objectAtIndex: index];
+                if key_window.is_null() {
+                    key_window = candidate;
+                }
+
+                let is_key_window: BOOL = msg_send![candidate, isKeyWindow];
+                if is_key_window == YES {
+                    key_window = candidate;
+                    break;
+                }
+            }
+        }
+    }
+
+    if key_window.is_null() {
+        return ptr::null_mut();
+    }
+
+    let mut view_controller: *mut Object = msg_send![key_window, rootViewController];
+    while !view_controller.is_null() {
+        let presented: *mut Object = msg_send![view_controller, presentedViewController];
+        if presented.is_null() {
+            break;
+        }
+        view_controller = presented;
+    }
+
+    view_controller
+}
+
 pub fn observe_ios_lifecycle(callback: impl FnMut(IosLifecycleEvent) + 'static) -> Subscription {
     super::ffi::observe_ios_lifecycle(callback)
 }
@@ -116,7 +279,8 @@ impl Platform for IosPlatform {
         // Unlike macOS where we need to explicitly run NSRunLoop, on iOS
         // the run loop is already running by the time this is called.
         // We only need to invoke the finish launching callback and return
-        // immediately to avoid blocking the UIKit event handling.
+        // immediately to avoid blocking UIKit event handling. The GPUI app
+        // lifetime itself is retained separately by the iOS app runtime.
         on_finish_launching();
     }
 
@@ -186,8 +350,8 @@ impl Platform for IosPlatform {
             let style: i64 = msg_send![trait_collection, userInterfaceStyle];
 
             match style {
-                2 => WindowAppearance::Dark,      // UIUserInterfaceStyleDark
-                _ => WindowAppearance::Light,    // UIUserInterfaceStyleLight or Unspecified
+                2 => WindowAppearance::Dark,  // UIUserInterfaceStyleDark
+                _ => WindowAppearance::Light, // UIUserInterfaceStyleLight or Unspecified
             }
         }
     }
@@ -212,18 +376,96 @@ impl Platform for IosPlatform {
 
     fn prompt_for_paths(
         &self,
-        _options: PathPromptOptions,
+        options: PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
-        // iOS uses UIDocumentPickerViewController for file access
-        // For a remote-first app, we don't support local file picking
-        tx.send(Err(anyhow!("Local file access not supported on iOS. Use remote connection."))).ok();
+        if options.directories {
+            tx.send(Err(anyhow!("Directory selection is not supported on iOS.")))
+                .ok();
+            return rx;
+        }
+        if !options.files {
+            tx.send(Err(anyhow!(
+                "The iOS file picker only supports file selection."
+            )))
+            .ok();
+            return rx;
+        }
+        if ACTIVE_PATH_PROMPT.lock().is_some() {
+            tx.send(Err(anyhow!("Another iOS file picker is already active.")))
+                .ok();
+            return rx;
+        }
+
+        *ACTIVE_PATH_PROMPT.lock() = Some(tx);
+        self.foreground_executor()
+            .spawn(async move {
+                unsafe {
+                    ensure_document_picker_delegate_registered();
+
+                    let document_types: *mut Object = msg_send![class!(NSMutableArray), array];
+                    let public_data = ns_string("public.data");
+                    let public_text = ns_string("public.text");
+                    let _: () = msg_send![document_types, addObject: public_data];
+                    let _: () = msg_send![document_types, addObject: public_text];
+
+                    let picker: *mut Object =
+                        msg_send![class!(UIDocumentPickerViewController), alloc];
+                    let picker: *mut Object =
+                        msg_send![picker, initWithDocumentTypes: document_types inMode: 0usize];
+
+                    if picker.is_null() {
+                        finish_active_path_prompt(Err(anyhow!(
+                            "Failed to create the iOS document picker."
+                        )));
+                        return;
+                    }
+
+                    if let Some(prompt) = options.prompt.as_ref() {
+                        let title = ns_string(prompt);
+                        let _: () = msg_send![picker, setTitle: title];
+                    }
+
+                    let delegate_class = *DOCUMENT_PICKER_DELEGATE_CLASS.get().unwrap();
+                    let delegate: *mut Object = msg_send![delegate_class, new];
+                    *ACTIVE_PATH_PROMPT_DELEGATE.lock() = Some(delegate as usize);
+
+                    let _: () = msg_send![picker, setDelegate: delegate];
+                    let _: () = msg_send![
+                        picker,
+                        setAllowsMultipleSelection: if options.multiple { YES } else { NO }
+                    ];
+
+                    let presenter = active_presenting_view_controller();
+                    if presenter.is_null() {
+                        finish_active_path_prompt(Err(anyhow!(
+                            "No active iOS view controller was available to present the file picker."
+                        )));
+                        return;
+                    }
+
+                    let _: () = msg_send![
+                        presenter,
+                        presentViewController: picker
+                        animated: YES
+                        completion: ptr::null::<c_void>()
+                    ];
+                }
+            })
+            .detach();
         rx
     }
 
-    fn prompt_for_new_path(&self, _directory: &Path, _suggested_name: Option<&str>) -> oneshot::Receiver<Result<Option<PathBuf>>> {
+    fn prompt_for_new_path(
+        &self,
+        _directory: &Path,
+        _suggested_name: Option<&str>,
+    ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
         let (tx, rx) = oneshot::channel();
-        tx.send(Err(anyhow!("Local file access not supported on iOS. Use remote connection."))).ok();
+        tx.send(Err(anyhow!(
+            "Local file access not supported on iOS. Use remote connection."
+        )))
+        .ok();
         rx
     }
 
@@ -273,6 +515,14 @@ impl Platform for IosPlatform {
         // No app menu on iOS
     }
 
+    fn thermal_state(&self) -> ThermalState {
+        ThermalState::Nominal
+    }
+
+    fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) {
+        drop(callback);
+    }
+
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
         Box::new(IosKeyboardLayout::new())
     }
@@ -289,14 +539,12 @@ impl Platform for IosPlatform {
             if utf8.is_null() {
                 Err(anyhow!("Failed to get app path"))
             } else {
-                Ok(PathBuf::from(
-                    std::ffi::CStr::from_ptr(utf8).to_str()?,
-                ))
+                Ok(PathBuf::from(std::ffi::CStr::from_ptr(utf8).to_str()?))
             }
         }
     }
 
-    fn path_for_auxiliary_executable(&self, name: &str) -> Result<PathBuf> {
+    fn path_for_auxiliary_executable(&self, _name: &str) -> Result<PathBuf> {
         // iOS apps don't have auxiliary executables in the same way
         Err(anyhow!("Auxiliary executables not supported on iOS"))
     }
@@ -342,10 +590,7 @@ impl Platform for IosPlatform {
                 if !string.is_null() {
                     let utf8: *const i8 = msg_send![string, UTF8String];
                     if !utf8.is_null() {
-                        let s = std::ffi::CStr::from_ptr(utf8)
-                            .to_str()
-                            .ok()?
-                            .to_string();
+                        let s = std::ffi::CStr::from_ptr(utf8).to_str().ok()?.to_string();
                         return Some(ClipboardItem::new_string(s));
                     }
                 }

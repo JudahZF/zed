@@ -15,7 +15,7 @@ use http_client::{AsyncBody, HttpClient, RedirectPolicy};
 use release_channel::ReleaseChannel;
 use remote::{
     HostKeyChallenge, HostKeyDecision, RemoteClientDelegate as RemoteClientDelegateTrait,
-    RemotePlatform,
+    RemotePlatform, SshKeyAuth,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -28,13 +28,115 @@ use uuid::Uuid;
 use crate::connect_view::ConnectView;
 
 /// Release asset metadata from cloud.zed.dev
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ReleaseAsset {
     url: String,
     #[serde(default)]
     version: String,
     #[serde(default, alias = "checksum_sha256", alias = "checksum")]
     sha256: Option<String>,
+}
+
+#[derive(Debug)]
+enum ReleaseAssetFetchError {
+    Http {
+        url: String,
+        status: http_client::StatusCode,
+        body: String,
+    },
+    Other(anyhow::Error),
+}
+
+impl ReleaseAssetFetchError {
+    fn is_not_found(&self) -> bool {
+        matches!(
+            self,
+            Self::Http {
+                status: http_client::StatusCode::NOT_FOUND,
+                ..
+            }
+        )
+    }
+
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Http { url, status, body } if body.is_empty() => {
+                anyhow::anyhow!("Failed to fetch release info from {url}: HTTP {status}")
+            }
+            Self::Http { url, status, body } => {
+                anyhow::anyhow!("Failed to fetch release info from {url}: HTTP {status}: {body}")
+            }
+            Self::Other(error) => error,
+        }
+    }
+}
+
+fn release_version_string(version: Option<&Version>) -> String {
+    version
+        .map(|version| {
+            let mut version = version.clone();
+            version.pre = semver::Prerelease::EMPTY;
+            version.build = semver::BuildMetadata::EMPTY;
+            version.to_string()
+        })
+        .unwrap_or_else(|| "latest".to_string())
+}
+
+fn release_asset_url(channel: &str, version: &str, os: &str, arch: &str) -> String {
+    format!(
+        "https://cloud.zed.dev/releases/{}/{}/asset?os={}&arch={}&asset=zed-remote-server",
+        channel, version, os, arch
+    )
+}
+
+async fn fetch_release_asset_once(
+    http_client: &Arc<dyn HttpClient>,
+    channel: &str,
+    version: Option<&Version>,
+    os: &str,
+    arch: &str,
+) -> std::result::Result<ReleaseAsset, ReleaseAssetFetchError> {
+    let version_str = release_version_string(version);
+    let url = release_asset_url(channel, &version_str, os, arch);
+
+    log::info!(
+        "Fetching remote server release metadata (channel={channel}, version={version_str}, os={os}, arch={arch})"
+    );
+
+    let request = http_client::Request::builder()
+        .uri(&url)
+        .extension(RedirectPolicy::FollowAll)
+        .body(AsyncBody::empty())
+        .map_err(|error| ReleaseAssetFetchError::Other(error.into()))?;
+
+    let mut response = http_client
+        .send(request)
+        .await
+        .map_err(ReleaseAssetFetchError::Other)?;
+    let status = response.status();
+
+    let mut body = Vec::new();
+    response
+        .body_mut()
+        .read_to_end(&mut body)
+        .await
+        .map_err(|error| {
+            ReleaseAssetFetchError::Other(
+                anyhow::Error::new(error).context("Failed to read release asset response"),
+            )
+        })?;
+
+    if !status.is_success() {
+        return Err(ReleaseAssetFetchError::Http {
+            url,
+            status,
+            body: String::from_utf8_lossy(&body).trim().to_string(),
+        });
+    }
+
+    serde_json::from_slice(&body)
+        .context("Failed to parse release asset response")
+        .map_err(ReleaseAssetFetchError::Other)
 }
 
 /// Fetches release asset metadata from cloud.zed.dev
@@ -45,40 +147,31 @@ async fn fetch_release_asset(
     os: &str,
     arch: &str,
 ) -> Result<ReleaseAsset> {
-    let version_str = version
-        .map(|v| {
-            let mut v = v.clone();
-            v.pre = semver::Prerelease::EMPTY;
-            v.build = semver::BuildMetadata::EMPTY;
-            v.to_string()
-        })
-        .unwrap_or_else(|| "latest".to_string());
+    match fetch_release_asset_once(http_client, channel, version, os, arch).await {
+        Ok(asset) => Ok(asset),
+        Err(error)
+            if channel == ReleaseChannel::Preview.dev_name()
+                && version.is_some()
+                && error.is_not_found() =>
+        {
+            let requested_version = release_version_string(version);
+            log::warn!(
+                "Preview remote server release metadata not found for version {requested_version} ({os}-{arch}); retrying latest published preview release"
+            );
 
-    let url = format!(
-        "https://cloud.zed.dev/releases/{}/{}/asset?os={}&arch={}&asset=zed-remote-server",
-        channel, version_str, os, arch
-    );
-
-    log::info!("Fetching remote server release metadata (channel={channel}, os={os}, arch={arch})");
-
-    let request = http_client::Request::builder()
-        .uri(&url)
-        .extension(RedirectPolicy::FollowAll)
-        .body(AsyncBody::empty())?;
-
-    let mut response = http_client.send(request).await?;
-
-    if !response.status().is_success() {
-        anyhow::bail!("Failed to fetch release info: HTTP {}", response.status());
+            let original_error = error.into_anyhow();
+            fetch_release_asset_once(http_client, channel, None, os, arch)
+                .await
+                .map_err(|fallback_error| {
+                    anyhow::anyhow!(
+                        "Preview remote server release lookup failed for version {requested_version} and fallback to latest also failed. Versioned error: {:#}. Latest error: {:#}",
+                        original_error,
+                        fallback_error.into_anyhow(),
+                    )
+                })
+        }
+        Err(error) => Err(error.into_anyhow()),
     }
-
-    let mut body = Vec::new();
-    response.body_mut().read_to_end(&mut body).await?;
-
-    let asset: ReleaseAsset =
-        serde_json::from_slice(&body).context("Failed to parse release asset response")?;
-
-    Ok(asset)
 }
 
 const MAX_REMOTE_SERVER_BINARY_BYTES: u64 = 200 * 1024 * 1024;
@@ -147,6 +240,7 @@ pub struct IosRemoteClientDelegate {
     window: AnyWindowHandle,
     connect_view: WeakEntity<ConnectView>,
     known_password: Option<EncryptedPassword>,
+    known_ssh_key: Option<SshKeyAuth>,
     host_key_prompt_tx: mpsc::UnboundedSender<HostKeyPromptRequest>,
     http_client: Arc<dyn HttpClient>,
 }
@@ -156,6 +250,7 @@ impl IosRemoteClientDelegate {
         window: AnyWindowHandle,
         connect_view: WeakEntity<ConnectView>,
         known_password: Option<EncryptedPassword>,
+        known_ssh_key: Option<SshKeyAuth>,
         host_key_prompt_tx: mpsc::UnboundedSender<HostKeyPromptRequest>,
         http_client: Arc<dyn HttpClient>,
     ) -> Self {
@@ -163,6 +258,7 @@ impl IosRemoteClientDelegate {
             window,
             connect_view,
             known_password,
+            known_ssh_key,
             host_key_prompt_tx,
             http_client,
         }
@@ -222,6 +318,10 @@ impl RemoteClientDelegateTrait for IosRemoteClientDelegate {
                 .map_err(|_| anyhow::anyhow!("Host key verification prompt was dismissed"))
         }
         .boxed()
+    }
+
+    fn ssh_key_auth(&self) -> Option<SshKeyAuth> {
+        self.known_ssh_key.clone()
     }
 
     fn get_download_url(
@@ -423,5 +523,152 @@ impl RemoteClientDelegateTrait for IosRemoteClientDelegate {
 
             Ok(version_path)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_client::{FakeHttpClient, Response, StatusCode};
+    use std::sync::{Arc, Mutex};
+
+    fn response(status: StatusCode, body: &str) -> Response<AsyncBody> {
+        Response::builder()
+            .status(status)
+            .body(body.to_string().into())
+            .expect("response should build")
+    }
+
+    fn create_test_http_client(
+        handler: impl Fn(&str) -> Response<AsyncBody> + Send + Sync + 'static,
+    ) -> (Arc<dyn HttpClient>, Arc<Mutex<Vec<String>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded_requests = requests.clone();
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(move |request| {
+            let recorded_requests = recorded_requests.clone();
+            let uri = request.uri().to_string();
+            let response = handler(&uri);
+            async move {
+                recorded_requests
+                    .lock()
+                    .expect("request recorder should lock")
+                    .push(uri);
+                Ok(response)
+            }
+        });
+        (client, requests)
+    }
+
+    #[test]
+    fn preview_versioned_lookup_retries_latest_on_404() {
+        let requested_version = Version::parse("0.229.0-preview.3+abcdef").expect("valid version");
+        let (http_client, requests) = create_test_http_client(|uri| {
+            if uri.contains("/preview/0.229.0/asset?") {
+                response(StatusCode::NOT_FOUND, "missing")
+            } else if uri.contains("/preview/latest/asset?") {
+                response(
+                    StatusCode::OK,
+                    r#"{"version":"0.228.0","url":"https://example.com/zed-remote-server.gz"}"#,
+                )
+            } else {
+                response(StatusCode::INTERNAL_SERVER_ERROR, "unexpected request")
+            }
+        });
+
+        let asset = futures::executor::block_on(fetch_release_asset(
+            &http_client,
+            "preview",
+            Some(&requested_version),
+            "macos",
+            "aarch64",
+        ))
+        .expect("preview fallback should succeed");
+
+        assert_eq!(asset.version, "0.228.0");
+        assert_eq!(asset.url, "https://example.com/zed-remote-server.gz");
+        assert_eq!(
+            requests.lock().expect("requests should lock").as_slice(),
+            [
+                "https://cloud.zed.dev/releases/preview/0.229.0/asset?os=macos&arch=aarch64&asset=zed-remote-server",
+                "https://cloud.zed.dev/releases/preview/latest/asset?os=macos&arch=aarch64&asset=zed-remote-server",
+            ]
+        );
+    }
+
+    #[test]
+    fn preview_versioned_lookup_does_not_retry_on_non_404_failure() {
+        let requested_version = Version::parse("0.229.0").expect("valid version");
+        let (http_client, requests) = create_test_http_client(|uri| {
+            if uri.contains("/preview/0.229.0/asset?") {
+                response(StatusCode::INTERNAL_SERVER_ERROR, "server error")
+            } else {
+                response(StatusCode::OK, "{}")
+            }
+        });
+
+        let error = futures::executor::block_on(fetch_release_asset(
+            &http_client,
+            "preview",
+            Some(&requested_version),
+            "macos",
+            "aarch64",
+        ))
+        .expect_err("preview 500 should not retry");
+
+        assert!(error.to_string().contains("HTTP 500 Internal Server Error"));
+        assert_eq!(requests.lock().expect("requests should lock").len(), 1);
+    }
+
+    #[test]
+    fn stable_lookup_does_not_retry_on_404() {
+        let requested_version = Version::parse("0.229.0").expect("valid version");
+        let (http_client, requests) = create_test_http_client(|uri| {
+            if uri.contains("/stable/0.229.0/asset?") {
+                response(StatusCode::NOT_FOUND, "missing")
+            } else {
+                response(StatusCode::OK, "{}")
+            }
+        });
+
+        let error = futures::executor::block_on(fetch_release_asset(
+            &http_client,
+            "stable",
+            Some(&requested_version),
+            "macos",
+            "aarch64",
+        ))
+        .expect_err("stable 404 should not retry");
+
+        assert!(error.to_string().contains("HTTP 404 Not Found"));
+        assert_eq!(requests.lock().expect("requests should lock").len(), 1);
+    }
+
+    #[test]
+    fn preview_fallback_surfaces_both_errors_when_latest_also_fails() {
+        let requested_version = Version::parse("0.229.0").expect("valid version");
+        let (http_client, requests) = create_test_http_client(|uri| {
+            if uri.contains("/preview/0.229.0/asset?") {
+                response(StatusCode::NOT_FOUND, "missing versioned asset")
+            } else if uri.contains("/preview/latest/asset?") {
+                response(StatusCode::INTERNAL_SERVER_ERROR, "latest lookup failed")
+            } else {
+                response(StatusCode::OK, "{}")
+            }
+        });
+
+        let error = futures::executor::block_on(fetch_release_asset(
+            &http_client,
+            "preview",
+            Some(&requested_version),
+            "macos",
+            "aarch64",
+        ))
+        .expect_err("preview fallback failure should bubble up");
+
+        let message = error.to_string();
+        assert!(message.contains("fallback to latest also failed"));
+        assert!(message.contains("HTTP 404 Not Found"));
+        assert!(message.contains("HTTP 500 Internal Server Error"));
+        assert_eq!(requests.lock().expect("requests should lock").len(), 2);
     }
 }

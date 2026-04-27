@@ -21,7 +21,6 @@ mod window;
 #[cfg(feature = "font-kit")]
 mod text_system;
 
-#[path = "../mac/metal_atlas.rs"]
 mod metal_atlas;
 
 // iOS uses a native Metal renderer with simulator-safe clipping (no Blade dependency).
@@ -37,7 +36,7 @@ use std::ops::Range;
 
 pub(crate) use dispatcher::*;
 pub(crate) use display::*;
-pub(crate) use platform::*;
+pub use platform::*;
 pub(crate) use window::*;
 
 #[cfg(feature = "font-kit")]

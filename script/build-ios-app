@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: script/build-ios-app <simulator|device|archive> [options]
+
+Build the iPad app through Xcode with the checked-in iOS project.
+
+Modes:
+  simulator   Build for the iOS simulator.
+  device      Build for a generic iOS device target without code signing.
+  archive     Create a signed .xcarchive for release/TestFlight workflows.
+
+Options:
+  --configuration <Debug|Release>     Override the Xcode build configuration.
+  --derived-data-path <path>          Override the Xcode derived data path.
+  --archive-path <path>               Override the archive output path for archive mode.
+  --result-bundle-path <path>         Write an .xcresult bundle to this path.
+  --scheme <name>                     Override the Xcode scheme. Default: Zed.
+  --skip-toolchain-check              Skip script/setup-ios-toolchain.
+  --regenerate-project                Regenerate crates/zed_ios/ios/Zed.xcodeproj with xcodegen.
+  --allow-provisioning-updates        Let xcodebuild talk to Apple for signing assets.
+  --authentication-key-path <path>    App Store Connect API key for signing operations.
+  --authentication-key-id <id>        App Store Connect API key identifier.
+  --authentication-key-issuer-id <id> App Store Connect API issuer identifier.
+  --code-sign-device-build            Allow signing for device builds instead of compile-only.
+  -h, --help                          Show this help.
+EOF
+}
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+project_directory="${repo_root}/crates/zed_ios/ios"
+project_path="${project_directory}/Zed.xcodeproj"
+scheme="Zed"
+mode=""
+configuration=""
+derived_data_path="${repo_root}/target/xcode/ios"
+archive_path="${repo_root}/target/ios/Zed.xcarchive"
+result_bundle_path=""
+run_toolchain_check=true
+regenerate_project=false
+allow_provisioning_updates=false
+authentication_key_path=""
+authentication_key_id=""
+authentication_key_issuer_id=""
+code_sign_device_build=false
+
+if [[ $# -eq 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
+mode="$1"
+shift
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --configuration)
+      configuration="$2"
+      shift 2
+      ;;
+    --derived-data-path)
+      derived_data_path="$2"
+      shift 2
+      ;;
+    --archive-path)
+      archive_path="$2"
+      shift 2
+      ;;
+    --result-bundle-path)
+      result_bundle_path="$2"
+      shift 2
+      ;;
+    --scheme)
+      scheme="$2"
+      shift 2
+      ;;
+    --skip-toolchain-check)
+      run_toolchain_check=false
+      shift
+      ;;
+    --regenerate-project)
+      regenerate_project=true
+      shift
+      ;;
+    --allow-provisioning-updates)
+      allow_provisioning_updates=true
+      shift
+      ;;
+    --authentication-key-path)
+      authentication_key_path="$2"
+      shift 2
+      ;;
+    --authentication-key-id)
+      authentication_key_id="$2"
+      shift 2
+      ;;
+    --authentication-key-issuer-id)
+      authentication_key_issuer_id="$2"
+      shift 2
+      ;;
+    --code-sign-device-build)
+      code_sign_device_build=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option '$1'" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "${mode}" in
+  simulator)
+    sdk="iphonesimulator"
+    destination="generic/platform=iOS Simulator"
+    build_action="build"
+    if [[ -z "${configuration}" ]]; then
+      configuration="Debug"
+    fi
+    ;;
+  device)
+    sdk="iphoneos"
+    destination="generic/platform=iOS"
+    build_action="build"
+    if [[ -z "${configuration}" ]]; then
+      configuration="Debug"
+    fi
+    ;;
+  archive)
+    sdk="iphoneos"
+    destination="generic/platform=iOS"
+    build_action="archive"
+    if [[ -z "${configuration}" ]]; then
+      configuration="Release"
+    fi
+    ;;
+  *)
+    echo "error: mode must be one of simulator, device, or archive" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${run_toolchain_check}" == true ]]; then
+  "${repo_root}/script/setup-ios-toolchain"
+fi
+
+if [[ "${regenerate_project}" == true ]]; then
+  if ! command -v xcodegen >/dev/null 2>&1; then
+    echo "error: xcodegen is required for --regenerate-project" >&2
+    exit 1
+  fi
+  (
+    cd "${project_directory}"
+    xcodegen generate
+  )
+fi
+
+mkdir -p "$(dirname "${derived_data_path}")"
+mkdir -p "$(dirname "${archive_path}")"
+
+xcodebuild_args=(
+  -project "${project_path}"
+  -scheme "${scheme}"
+  -configuration "${configuration}"
+  -sdk "${sdk}"
+  -destination "${destination}"
+  -derivedDataPath "${derived_data_path}"
+)
+
+if [[ -n "${result_bundle_path}" ]]; then
+  mkdir -p "$(dirname "${result_bundle_path}")"
+  xcodebuild_args+=(-resultBundlePath "${result_bundle_path}")
+fi
+
+if [[ "${allow_provisioning_updates}" == true ]]; then
+  xcodebuild_args+=(-allowProvisioningUpdates)
+fi
+
+if [[ -n "${authentication_key_path}" || -n "${authentication_key_id}" || -n "${authentication_key_issuer_id}" ]]; then
+  if [[ -z "${authentication_key_path}" || -z "${authentication_key_id}" || -z "${authentication_key_issuer_id}" ]]; then
+    echo "error: authentication key path, id, and issuer id must be provided together" >&2
+    exit 1
+  fi
+  xcodebuild_args+=(
+    -authenticationKeyPath "${authentication_key_path}"
+    -authenticationKeyID "${authentication_key_id}"
+    -authenticationKeyIssuerID "${authentication_key_issuer_id}"
+  )
+fi
+
+if [[ "${mode}" == "archive" ]]; then
+  xcodebuild_args+=(-archivePath "${archive_path}")
+fi
+
+if [[ "${mode}" == "device" && "${code_sign_device_build}" == false ]]; then
+  xcodebuild_args+=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO)
+fi
+
+echo "Building iOS app"
+echo "  mode: ${mode}"
+echo "  configuration: ${configuration}"
+echo "  sdk: ${sdk}"
+echo "  destination: ${destination}"
+if [[ "${mode}" == "archive" ]]; then
+  echo "  archive: ${archive_path}"
+fi
+
+xcodebuild "${xcodebuild_args[@]}" "${build_action}"

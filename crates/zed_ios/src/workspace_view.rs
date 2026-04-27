@@ -9,12 +9,19 @@ use gpui::{
     Render, Window, div, prelude::*, px, rgb,
 };
 use project::Project;
+use prompt_store::PromptBuilder;
 use remote::{RemoteClient, RemoteConnectionOptions, SshConnectionOptions};
 use std::path::PathBuf;
 use workspace::{AppState, Workspace};
 
 use crate::mobile_feature_policy::MobileFeaturePolicy;
-use crate::persistence::{ConnectionDb, SessionRestoreState, current_timestamp};
+use crate::persistence::{
+    ConnectionDb, MobileWorkspaceSnapshotV1, SessionRestoreState, current_timestamp,
+};
+use crate::{
+    MobilePanelLayout, apply_mobile_panel_layout, initialize_mobile_panels,
+    load_mobile_workspace_snapshot, register_mobile_actions,
+};
 
 /// Event emitted when user wants to disconnect
 pub struct DisconnectRequested;
@@ -120,8 +127,24 @@ impl WorkspaceView {
             true,
             cx,
         );
-        let workspace =
-            cx.new(|cx| Workspace::new(None, project.clone(), app_state.clone(), window, cx));
+        let feature_policy = MobileFeaturePolicy::from_app(cx);
+        let prompt_builder = PromptBuilder::load(app_state.fs.clone(), false, cx);
+        let restored_snapshot = load_mobile_workspace_snapshot(self.connection_profile_id);
+        let mobile_panel_layout = MobilePanelLayout::from_snapshot(restored_snapshot.as_ref());
+        let workspace = cx.new(|cx| {
+            let mut workspace =
+                Workspace::new(None, project.clone(), app_state.clone(), window, cx);
+            let panels_task = initialize_mobile_panels(
+                prompt_builder.clone(),
+                feature_policy,
+                restored_snapshot.clone(),
+                window,
+                cx,
+            );
+            workspace.set_panels_task(panels_task);
+            register_mobile_actions(feature_policy, &mut workspace, cx);
+            workspace
+        });
         let window_handle: AnyWindowHandle = window.window_handle();
         self.workspace = Some(workspace.clone());
 
@@ -183,6 +206,7 @@ impl WorkspaceView {
             let restore_result = {
                 let paths = canonical_paths;
                 if use_shared_remote_restore {
+                    let workspace = workspace.clone();
                     match window_handle.update(cx, move |_, window, cx| {
                         workspace.update(cx, |workspace, cx| {
                             workspace.restore_remote_project(
@@ -197,6 +221,7 @@ impl WorkspaceView {
                         Err(err) => Err(err),
                     }
                 } else {
+                    let workspace = workspace.clone();
                     match window_handle.update(cx, move |_, window, cx| {
                         workspace.update(cx, |workspace, cx| {
                             workspace.open_paths(
@@ -217,6 +242,23 @@ impl WorkspaceView {
                 }
             };
 
+            if restore_result.is_ok() {
+                match window_handle.update(cx, {
+                    let workspace = workspace.clone();
+                    let mobile_panel_layout = mobile_panel_layout.clone();
+                    move |_, window, cx| {
+                        workspace.update(cx, |workspace, cx| {
+                            apply_mobile_panel_layout(workspace, &mobile_panel_layout, window, cx);
+                        });
+                    }
+                }) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        log::warn!("[Zed iOS] Failed to reapply mobile panel layout: {err:#}");
+                    }
+                }
+            }
+
             this.update(cx, |this, cx| {
                 match restore_result {
                     Ok(_) => {
@@ -230,11 +272,16 @@ impl WorkspaceView {
                         if let Some(connection_profile_id) = this.connection_profile_id {
                             if let Some(remote_path) = remote_path.clone() {
                                 if let Err(err) = ConnectionDb::open().and_then(|db| {
+                                    let snapshot = MobileWorkspaceSnapshotV1::new(
+                                        Some(remote_path.clone()),
+                                        Some(remote_path.clone()),
+                                    )
+                                    .to_json()?;
                                     db.save_session_restore_state(&SessionRestoreState {
                                         connection_profile_id,
                                         remote_path: Some(remote_path.clone()),
                                         last_opened_worktree: Some(remote_path),
-                                        workspace_state_json: None,
+                                        workspace_state_json: Some(snapshot),
                                         updated_at: current_timestamp(),
                                     })
                                 }) {

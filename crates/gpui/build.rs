@@ -129,6 +129,15 @@ mod ios {
     #[cfg(not(feature = "runtime_shaders"))]
     fn compile_metal_shaders(header_path: &Path) {
         let shader_path = "./src/platform/ios/shaders.metal";
+        let target = env::var("TARGET").unwrap_or_default();
+        let target_abi = env::var("CARGO_CFG_TARGET_ABI").unwrap_or_default();
+        let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+        let (sdk, deployment_flag) =
+            if target_abi == "sim" || target_env == "sim" || target.ends_with("-sim") {
+                ("iphonesimulator", "-mios-simulator-version-min=16.0")
+            } else {
+                ("iphoneos", "-mios-version-min=16.0")
+            };
         let air_output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.air");
         let metallib_output_path =
             PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.metallib");
@@ -137,10 +146,10 @@ mod ios {
         let output = Command::new("xcrun")
             .args([
                 "-sdk",
-                "iphoneos",
+                sdk,
                 "metal",
                 "-gline-tables-only",
-                "-mios-version-min=16.0",
+                deployment_flag,
                 "-MO",
                 "-c",
                 shader_path,
@@ -154,14 +163,14 @@ mod ios {
 
         if !output.status.success() {
             println!(
-                "cargo::error=metal shader compilation failed:\n{}",
+                "cargo::error=metal shader compilation failed for target {target} using SDK {sdk}:\n{}",
                 String::from_utf8_lossy(&output.stderr)
             );
             process::exit(1);
         }
 
         let output = Command::new("xcrun")
-            .args(["-sdk", "iphoneos", "metallib"])
+            .args(["-sdk", sdk, "metallib"])
             .arg(air_output_path)
             .arg("-o")
             .arg(metallib_output_path)
@@ -170,7 +179,7 @@ mod ios {
 
         if !output.status.success() {
             println!(
-                "cargo::error=metallib compilation failed:\n{}",
+                "cargo::error=metallib compilation failed for target {target} using SDK {sdk}:\n{}",
                 String::from_utf8_lossy(&output.stderr)
             );
             process::exit(1);

@@ -51,6 +51,7 @@ targets:
         LIBRARY_SEARCH_PATHS[config=Debug][sdk=iphoneos*]: "$(inherited) $(PROJECT_DIR)/../../../target/aarch64-apple-ios/debug"
         LIBRARY_SEARCH_PATHS[config=Release][sdk=iphoneos*]: "$(inherited) $(PROJECT_DIR)/../../../target/aarch64-apple-ios/release"
         OTHER_LDFLAGS:
+          - "-ObjC"
           - "-lzed_ios"
           - "-lc++"
           - "-lz"
@@ -64,6 +65,7 @@ targets:
           - "-framework Security"
           - "-framework Foundation"
           - "-framework SystemConfiguration"
+          - "-framework Network"
           - "-framework CoreFoundation"
           - "-framework AudioToolbox"
           - "-framework CoreMedia"
@@ -95,6 +97,21 @@ targets:
             RUST_TARGET="aarch64-apple-ios-sim"
           else
             RUST_TARGET="aarch64-apple-ios"
+          fi
+
+          if ! command -v rustup &> /dev/null; then
+            echo "error: rustup not found in PATH"
+            echo "A rustup-managed Rust toolchain is required for iOS builds."
+            echo "Install Rust via https://rustup.rs and then run:"
+            echo "  rustup target add aarch64-apple-ios-sim aarch64-apple-ios"
+            exit 1
+          fi
+
+          if ! rustup target list --installed | grep -Fxq "$RUST_TARGET"; then
+            echo "error: Rust target $RUST_TARGET is not installed"
+            echo "Install it with:"
+            echo "  rustup target add $RUST_TARGET"
+            exit 1
           fi
           
           # Determine build configuration

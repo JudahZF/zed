@@ -31,6 +31,8 @@ use gpui::{
     EventEmitter, FutureExt, Global, Task, WeakEntity,
 };
 use parking_lot::Mutex;
+#[cfg(target_os = "ios")]
+use russh::keys::{PublicKeyBase64, decode_secret_key};
 
 use release_channel::ReleaseChannel;
 use rpc::{
@@ -38,6 +40,8 @@ use rpc::{
     proto::{self, Envelope, EnvelopedMessage, PeerId, RequestMessage, build_typed_envelope},
 };
 use semver::Version;
+#[cfg(target_os = "ios")]
+use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     fmt,
@@ -123,6 +127,35 @@ pub struct HostKeyChallenge {
     pub fingerprint_sha256: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshKeyAuth {
+    pub private_key: String,
+    pub passphrase: Option<String>,
+    pub display_name: Option<String>,
+    pub fingerprint_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshKeyMetadata {
+    pub algorithm: String,
+    pub fingerprint_sha256: String,
+}
+
+#[cfg(target_os = "ios")]
+impl SshKeyAuth {
+    pub fn metadata_for_private_key(
+        private_key: &str,
+        passphrase: Option<&str>,
+    ) -> Result<SshKeyMetadata> {
+        let private_key = decode_secret_key(private_key, passphrase)
+            .context("Failed to parse SSH private key")?;
+        Ok(SshKeyMetadata {
+            algorithm: private_key.algorithm().to_string(),
+            fingerprint_sha256: hex::encode(Sha256::digest(private_key.public_key_bytes())),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostKeyDecision {
     TrustAndSave,
@@ -163,6 +196,9 @@ pub trait RemoteClientDelegate: Send + Sync {
         _challenge: HostKeyChallenge,
     ) -> BoxFuture<'static, Result<HostKeyDecision>> {
         async move { Ok(HostKeyDecision::TrustAndSave) }.boxed()
+    }
+    fn ssh_key_auth(&self) -> Option<SshKeyAuth> {
+        None
     }
     fn set_status(&self, status: Option<&str>, cx: &mut AsyncApp);
 }
@@ -1002,6 +1038,24 @@ impl RemoteClient {
         connection.build_forward_ports_command(forwards)
     }
 
+    pub fn start_port_forwarding(
+        &self,
+        forwards: Vec<(String, u16, String, u16)>,
+        cx: &App,
+    ) -> Task<Result<()>> {
+        let Some(connection) = self.remote_connection() else {
+            return Task::ready(Err(anyhow!("no remote connection")));
+        };
+        connection.start_port_forwarding(forwards, cx)
+    }
+
+    pub fn stop_port_forwarding(&self, cx: &App) -> Task<Result<()>> {
+        let Some(connection) = self.remote_connection() else {
+            return Task::ready(Ok(()));
+        };
+        connection.stop_port_forwarding(cx)
+    }
+
     pub fn upload_directory(
         &self,
         src_path: PathBuf,
@@ -1432,6 +1486,18 @@ pub trait RemoteConnection: Send + Sync {
         &self,
         forwards: Vec<(u16, String, u16)>,
     ) -> Result<CommandTemplate>;
+    fn start_port_forwarding(
+        &self,
+        _forwards: Vec<(String, u16, String, u16)>,
+        _cx: &App,
+    ) -> Task<Result<()>> {
+        Task::ready(Err(anyhow!(
+            "Port forwarding is not supported for this connection"
+        )))
+    }
+    fn stop_port_forwarding(&self, _cx: &App) -> Task<Result<()>> {
+        Task::ready(Ok(()))
+    }
     fn connection_options(&self) -> RemoteConnectionOptions;
     fn path_style(&self) -> PathStyle;
     fn shell(&self) -> String;

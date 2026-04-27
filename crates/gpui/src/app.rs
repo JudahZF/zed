@@ -69,6 +69,11 @@ mod visual_test_context;
 /// The duration for which futures returned from [Context::on_app_quit] can run before the application fully quits.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 
+#[cfg(target_os = "ios")]
+thread_local! {
+    static RETAINED_IOS_APPLICATION: RefCell<Option<Rc<AppCell>>> = const { RefCell::new(None) };
+}
+
 /// Temporary(?) wrapper around [`RefCell<App>`] to help us debug any double borrows.
 /// Strongly consider removing after stabilization.
 #[doc(hidden)]
@@ -183,6 +188,10 @@ impl Application {
     {
         let this = self.0.clone();
         let platform = self.0.borrow().platform.clone();
+        #[cfg(target_os = "ios")]
+        // UIKit already owns the main loop, so iOS returns from `platform.run`
+        // immediately. Retain the app root until the platform quit path releases it.
+        retain_ios_application(&this);
         platform.run(Box::new(move || {
             let cx = &mut *this.borrow_mut();
             on_finish_launching(cx);
@@ -233,6 +242,25 @@ impl Application {
     pub fn path_for_auxiliary_executable(&self, name: &str) -> Result<PathBuf> {
         self.0.borrow().path_for_auxiliary_executable(name)
     }
+}
+
+#[cfg(target_os = "ios")]
+fn retain_ios_application(app: &Rc<AppCell>) {
+    RETAINED_IOS_APPLICATION.with(|retained_app| {
+        let previous = retained_app.borrow_mut().replace(app.clone());
+        if previous.is_some() {
+            debug_assert!(false, "replaced retained iOS application root");
+            #[cfg(not(debug_assertions))]
+            log::warn!("replaced retained iOS application root");
+        }
+    });
+}
+
+#[cfg(target_os = "ios")]
+fn release_retained_ios_application() {
+    RETAINED_IOS_APPLICATION.with(|retained_app| {
+        retained_app.borrow_mut().take();
+    });
 }
 
 type Handler = Box<dyn FnMut(&mut App) -> bool + 'static>;
@@ -757,6 +785,8 @@ impl App {
                 if let Some(cx) = cx.upgrade() {
                     cx.borrow_mut().shutdown();
                 }
+                #[cfg(target_os = "ios")]
+                release_retained_ios_application();
             }
         }));
 

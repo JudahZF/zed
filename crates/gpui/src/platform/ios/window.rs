@@ -10,15 +10,16 @@ use super::{
         UIKeyModifierFlags, ios_keyboard_log, translate_key_press, translate_modifiers_changed,
         translate_pan_to_scroll, translate_touch_to_mouse,
     },
+    ns_string,
     renderer::{Context as RendererContext, Renderer},
 };
-use super::metal_atlas::MetalAtlas;
 use crate::{
     AnyWindowHandle, Bounds, Capslock, DevicePixels, DispatchEventResult, GpuSpecs, Modifiers,
     Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformWindow, Point, PromptButton,
     PromptLevel, RequestFrameOptions, Scene, Size, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowControlArea, WindowParams, platform::PlatformInputHandler, point, px, size,
 };
+use block::ConcreteBlock;
 use futures::channel::oneshot;
 use objc::{
     class,
@@ -29,10 +30,11 @@ use objc::{
 };
 use parking_lot::Mutex;
 use raw_window_handle::{
-    HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
-    UiKitDisplayHandle, UiKitWindowHandle,
+    HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, UiKitDisplayHandle,
+    UiKitWindowHandle,
 };
 use std::{
+    cell::RefCell,
     ffi::c_void,
     ptr,
     ptr::NonNull,
@@ -206,7 +208,12 @@ extern "C" fn touches_ended(this: &Object, _sel: Sel, touches: *mut Object, _eve
     handle_touches(this, touches, "ended");
 }
 
-extern "C" fn touches_cancelled(this: &Object, _sel: Sel, touches: *mut Object, _event: *mut Object) {
+extern "C" fn touches_cancelled(
+    this: &Object,
+    _sel: Sel,
+    touches: *mut Object,
+    _event: *mut Object,
+) {
     handle_touches(this, touches, "cancelled");
 }
 
@@ -983,14 +990,27 @@ impl IosWindow {
             })
         }
     }
+
+    unsafe fn top_presented_view_controller(&self) -> *mut Object {
+        let mut view_controller = self.view_controller;
+        while !view_controller.is_null() {
+            let presented: *mut Object = msg_send![view_controller, presentedViewController];
+            if presented.is_null() {
+                break;
+            }
+            view_controller = presented;
+        }
+        view_controller
+    }
 }
 
 impl HasWindowHandle for IosWindow {
-    fn window_handle(&self) -> std::result::Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+    fn window_handle(
+        &self,
+    ) -> std::result::Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+    {
         // UiKitWindowHandle::new takes the ui_view (not ui_window)
-        let mut handle = UiKitWindowHandle::new(
-            NonNull::new(self.view as *mut c_void).unwrap(),
-        );
+        let mut handle = UiKitWindowHandle::new(NonNull::new(self.view as *mut c_void).unwrap());
         handle.ui_view_controller = NonNull::new(self.view_controller as *mut c_void);
 
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::UiKit(handle)) })
@@ -998,9 +1018,14 @@ impl HasWindowHandle for IosWindow {
 }
 
 impl HasDisplayHandle for IosWindow {
-    fn display_handle(&self) -> std::result::Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+    fn display_handle(
+        &self,
+    ) -> std::result::Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+    {
         Ok(unsafe {
-            raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::UiKit(UiKitDisplayHandle::new()))
+            raw_window_handle::DisplayHandle::borrow_raw(RawDisplayHandle::UiKit(
+                UiKitDisplayHandle::new(),
+            ))
         })
     }
 }
@@ -1060,10 +1085,7 @@ impl PlatformWindow for IosWindow {
         // iOS doesn't have a persistent mouse position
         // Return center of the view as a reasonable default
         let bounds = self.bounds();
-        point(
-            bounds.size.width / 2.0,
-            bounds.size.height / 2.0,
-        )
+        point(bounds.size.width / 2.0, bounds.size.height / 2.0)
     }
 
     fn modifiers(&self) -> Modifiers {
@@ -1089,14 +1111,65 @@ impl PlatformWindow for IosWindow {
 
     fn prompt(
         &self,
-        _level: PromptLevel,
-        _msg: &str,
-        _detail: Option<&str>,
-        _answers: &[PromptButton],
+        level: PromptLevel,
+        msg: &str,
+        detail: Option<&str>,
+        answers: &[PromptButton],
     ) -> Option<oneshot::Receiver<usize>> {
-        // TODO: Implement UIAlertController with proper action handlers
-        // that capture tx and send the selected button index
-        None
+        unsafe {
+            let presenter = self.top_presented_view_controller();
+            if presenter.is_null() {
+                return None;
+            }
+
+            let title = ns_string(msg);
+            let message = detail
+                .map(|detail| ns_string(detail))
+                .unwrap_or(ptr::null_mut());
+            let alert: *mut Object = msg_send![
+                class!(UIAlertController),
+                alertControllerWithTitle: title
+                message: message
+                preferredStyle: 1usize
+            ];
+
+            let (done_tx, done_rx) = oneshot::channel();
+            let done_tx = Rc::new(RefCell::new(Some(done_tx)));
+
+            for (index, answer) in answers.iter().enumerate() {
+                let style = if answer.is_cancel() {
+                    1usize
+                } else if matches!(level, PromptLevel::Critical) {
+                    2usize
+                } else {
+                    0usize
+                };
+                let label = ns_string(answer.label());
+                let done_tx = done_tx.clone();
+                let block = ConcreteBlock::new(move |_action: *mut Object| {
+                    if let Some(done_tx) = done_tx.borrow_mut().take() {
+                        let _ = done_tx.send(index);
+                    }
+                });
+                let block = block.copy();
+                let action: *mut Object = msg_send![
+                    class!(UIAlertAction),
+                    actionWithTitle: label
+                    style: style
+                    handler: block
+                ];
+                let _: () = msg_send![alert, addAction: action];
+            }
+
+            let _: () = msg_send![
+                presenter,
+                presentViewController: alert
+                animated: YES
+                completion: ptr::null::<c_void>()
+            ];
+
+            Some(done_rx)
+        }
     }
 
     fn activate(&self) {
@@ -1114,6 +1187,10 @@ impl PlatformWindow for IosWindow {
 
     fn is_hovered(&self) -> bool {
         false // iOS doesn't have hover in the traditional sense
+    }
+
+    fn background_appearance(&self) -> WindowBackgroundAppearance {
+        WindowBackgroundAppearance::Opaque
     }
 
     fn set_title(&mut self, _title: &str) {
@@ -1186,6 +1263,10 @@ impl PlatformWindow for IosWindow {
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.state.renderer.lock().sprite_atlas().clone()
+    }
+
+    fn is_subpixel_rendering_supported(&self) -> bool {
+        false
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {

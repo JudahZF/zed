@@ -120,7 +120,13 @@ Try `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer`
 
 If you're on macOS 26, try `xcodebuild -downloadComponent MetalToolchain`
 
-If you're working on the iOS app, `script/setup-ios-toolchain` will validate the same prerequisite and can download the Metal toolchain for you.
+If you're working on the iOS app, `script/setup-ios-toolchain` will validate the same prerequisite, check the required Rust iOS targets, and can download the Metal toolchain for you.
+
+If it reports missing Rust iOS targets, install them with:
+
+```sh
+rustup target add aarch64-apple-ios-sim aarch64-apple-ios
+```
 
 ### Cargo errors claiming that a dependency is using unstable features
 
